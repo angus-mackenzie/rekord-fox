@@ -1,0 +1,49 @@
+.claude/settings.local.json
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials.json
+config/credentials.json
+
+# Local media and generated analysis data
+uploads/
+media/
+data/media/
+data/uploads/
+data/audio-cache/
+data/fingerprints/
+data/waveforms/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.venv/
+venv/
+
+# Node and frontend
+node_modules/
+dist/
+build/
+.next/
+.vite/
+coverage/
+playwright-report/
+test-results/
+
+# OS and editor noise
+.DS_Store
+.idea/
+.vscode/

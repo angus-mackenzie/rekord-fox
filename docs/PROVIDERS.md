@@ -18,6 +18,11 @@ Best for:
 - commercially released tracks
 - fast metadata lookup
 
+Strengths:
+- fast recognition
+- strong accuracy for clean commercial audio
+- useful metadata resolution
+
 Weaknesses:
 - less robust to heavy transitions
 - less robust to pitch/BPM shifts
@@ -36,6 +41,8 @@ Best for:
 - pitch-shifted audio
 - time-stretched audio
 - local fingerprint databases
+- livestreams
+- festival recordings
 
 Panako is a strong MVP candidate because it is designed for robustness against time stretching and pitch shifting.
 
@@ -52,6 +59,25 @@ Potential drawbacks:
 - more infrastructure
 - larger indexes
 - possible GPU requirements
+
+Potential strengths:
+- better robustness to degraded recordings
+- generalized similarity matching
+- improved handling of noisy environments
+
+Neural systems are optional future enhancements, not MVP requirements.
+
+## Provider Capabilities
+
+The provider system should support:
+
+- local databases
+- remote APIs
+- hybrid providers
+- multiple providers running simultaneously
+- provider weighting
+- provider failover
+- offline-first operation where possible
 
 ## Provider Interface
 
@@ -102,5 +128,27 @@ The fusion engine may use:
 * temporal continuity
 * spectral similarity
 * agreement between providers
+* confidence decay over time
 * historical provider reliability
 * match stability across neighbouring chunks
+
+The fusion engine should favor stable detections, repeated confirmations,
+temporally consistent matches, and cross-provider agreement. It should avoid
+promoting noisy intermittent detections, rapid false switching between tracks,
+or isolated low-confidence matches.
+
+## Local Fingerprint Corpus
+
+The system should support building and querying a local fingerprint corpus.
+
+Potential use cases:
+
+- private music libraries
+- unreleased tracks
+- Rekordbox collections
+- Bandcamp downloads
+- offline festival use
+- local-only identification
+
+The corpus should support incremental indexing, re-indexing, fingerprint
+caching, duplicate detection, and provider-specific indexes.

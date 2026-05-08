@@ -2,6 +2,10 @@
 
 This repository is designed to be developed with both humans and AI coding agents.
 
+Claude Code users must read `CLAUDE.md` first. Claude-specific workflows,
+skills, settings, and subagents live under `.claude/`. `AGENTS.md` remains the
+shared baseline for all coding agents.
+
 Agents must prioritize:
 - small incremental changes
 - clear interfaces
