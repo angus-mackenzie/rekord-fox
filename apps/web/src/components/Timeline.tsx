@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import type { SegmentOut, SegmentState, TimelineOut } from '../types'
+import { useEffect, useRef, useState } from 'react'
+import { getWaveform } from '../api'
+import type { SegmentOut, SegmentState, TimelineOut, WaveformOut } from '../types'
 
 const STATE_STYLE: Record<SegmentState, { dot: string; label: string; border: string }> = {
   confirmed:  { dot: 'bg-emerald-400',  label: 'text-emerald-300',  border: 'border-emerald-700/60' },
@@ -7,6 +8,15 @@ const STATE_STYLE: Record<SegmentState, { dot: string; label: string; border: st
   uncertain:  { dot: 'bg-amber-400',    label: 'text-amber-300',    border: 'border-amber-700/60' },
   unresolved: { dot: 'bg-zinc-500',     label: 'text-zinc-400',     border: 'border-zinc-700' },
 }
+
+// Canvas fill colors keyed by state — picked to match the dot colors above.
+const STATE_FILL: Record<SegmentState, string> = {
+  confirmed:  'rgba(52, 211, 153, 0.95)',  // emerald-400
+  likely:     'rgba(56, 189, 248, 0.95)',  // sky-400
+  uncertain:  'rgba(251, 191, 36, 0.9)',   // amber-400
+  unresolved: 'rgba(82, 82, 91, 0.55)',    // zinc-600 (dim — unresolved is absence)
+}
+const PENDING_FILL = 'rgba(82, 82, 91, 0.55)'
 
 // Brand-color icon glyphs for external links. Order = display priority
 // (Spotify first per docs/INVARIANTS.md), so the most-useful link is leftmost.
@@ -37,12 +47,6 @@ function fmtTime(s: number): string {
     : `${m}:${String(sec).padStart(2, '0')}`
 }
 
-function fmtDur(s: number): string {
-  const m = Math.floor(s / 60)
-  const sec = Math.round(s % 60)
-  return m > 0 ? `${m}m ${sec}s` : `${sec}s`
-}
-
 export function Timeline({
   timeline,
   onRebuild,
@@ -54,6 +58,12 @@ export function Timeline({
 }) {
   const { segments, media } = timeline
   const duration = media.duration_seconds ?? 0
+  // Hover state lives here so a row hover highlights its waveform region and
+  // a waveform hover highlights the matching row — bidirectional cross-link.
+  // Deliberately no auto-scroll: yanking the page on every cursor move makes
+  // it impossible to navigate between the waveform and a row out of view.
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+
   return (
     <div className="mt-6">
       <div className="flex items-center gap-3 text-sm text-zinc-400 mb-2">
@@ -75,45 +85,214 @@ export function Timeline({
           </button>
         )}
       </div>
-      {duration > 0 && <CoverageBar segments={segments} duration={duration} />}
+      {duration > 0 && (
+        <WaveformBar
+          mediaId={media.id}
+          duration={duration}
+          segments={segments}
+          hoveredId={hoveredId}
+          onHoverChange={setHoveredId}
+        />
+      )}
       <ul className="mt-4 rounded-lg border border-zinc-800/70 divide-y divide-zinc-800/70 overflow-hidden">
         {segments.map((seg) => (
-          <SegmentRow key={seg.id} seg={seg} />
+          <SegmentRow
+            key={seg.id}
+            seg={seg}
+            highlighted={seg.id === hoveredId}
+            onHoverChange={setHoveredId}
+          />
         ))}
       </ul>
     </div>
   )
 }
 
-function CoverageBar({ segments, duration }: { segments: SegmentOut[]; duration: number }) {
+/**
+ * Waveform with per-bar segment tinting + a thin coverage strip beneath.
+ *
+ * Each peak is colored by the state of whichever segment covers its time
+ * position; gaps fall back to a dim "pending" grey. A hover-tooltip on the
+ * canvas shows the time + segment title at the cursor for quick scanning.
+ */
+function WaveformBar({
+  mediaId,
+  duration,
+  segments,
+  hoveredId,
+  onHoverChange,
+}: {
+  mediaId: string
+  duration: number
+  segments: SegmentOut[]
+  hoveredId: string | null
+  onHoverChange: (id: string | null) => void
+}) {
+  const [waveform, setWaveform] = useState<WaveformOut | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [hoverX, setHoverX] = useState<number | null>(null)
+  const hoveredSeg = hoveredId ? segments.find((s) => s.id === hoveredId) ?? null : null
+
+  useEffect(() => {
+    let alive = true
+    getWaveform(mediaId, 800).then((w) => { if (alive) setWaveform(w) }).catch(() => {})
+    return () => { alive = false }
+  }, [mediaId])
+
+  // HiDPI fit + redraw on resize / data change.
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !waveform) return
+    const fit = () => {
+      const dpr = window.devicePixelRatio || 1
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr
+        canvas.height = h * dpr
+      }
+      drawSegmentedWaveform(canvas, waveform.peaks, segments, duration)
+    }
+    fit()
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [waveform, segments, duration])
+
+  function onMouseMove(e: React.MouseEvent) {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const x = e.clientX - rect.left
+    const frac = Math.max(0, Math.min(1, x / rect.width))
+    const t = frac * duration
+    const seg = segments.find((s) => t >= s.start_seconds && t < s.end_seconds) ?? null
+    setHoverX(x)
+    onHoverChange(seg?.id ?? null)
+  }
+
+  function onMouseLeave() {
+    setHoverX(null)
+    onHoverChange(null)
+  }
+
+  const containerW = containerRef.current?.clientWidth ?? 0
+  const tooltipText = hoverX != null ? fmtTime((hoverX / Math.max(1, containerW)) * duration) : null
+
   return (
-    <div className="h-3 w-full rounded bg-zinc-900 overflow-hidden flex">
-      {segments.map((s) => {
-        const w = ((s.end_seconds - s.start_seconds) / duration) * 100
-        const styles = STATE_STYLE[s.state]
-        return (
+    <div
+      ref={containerRef}
+      className="relative rounded-lg bg-zinc-950 border border-zinc-800 overflow-hidden"
+      onMouseMove={onMouseMove}
+      onMouseLeave={onMouseLeave}
+    >
+      <canvas ref={canvasRef} className="block w-full" style={{ height: 96 }} />
+      {!waveform && (
+        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500">
+          loading waveform…
+        </div>
+      )}
+
+      {/* Region highlight for the currently-hovered segment (from either side). */}
+      {hoveredSeg && duration > 0 && (
+        <div
+          className="absolute top-0 bottom-0 pointer-events-none ring-2 ring-white/70 bg-white/10 transition-[left,width] duration-100"
+          style={{
+            left: `${(hoveredSeg.start_seconds / duration) * 100}%`,
+            width: `${((hoveredSeg.end_seconds - hoveredSeg.start_seconds) / duration) * 100}%`,
+          }}
+        />
+      )}
+
+      {/* Cursor line + tooltip when hovering directly on the waveform. */}
+      {hoverX != null && waveform && (
+        <>
           <div
-            key={s.id}
-            className={styles.dot}
-            style={{ width: `${w}%` }}
-            title={`${fmtTime(s.start_seconds)}–${fmtTime(s.end_seconds)} · ${s.state}${s.title ? ` · ${s.title}` : ''}`}
+            className="absolute top-0 bottom-0 w-px bg-zinc-200/50 pointer-events-none"
+            style={{ left: hoverX }}
           />
-        )
-      })}
+          <div
+            className="absolute -top-7 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-200 whitespace-nowrap pointer-events-none shadow-lg"
+            style={{ left: Math.min(Math.max(0, hoverX - 80), containerW - 160) }}
+          >
+            <span className="font-mono tabular-nums">{tooltipText}</span>
+            {hoveredSeg?.title && (
+              <span className="text-zinc-400"> · {hoveredSeg.title}</span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }
 
-function SegmentRow({ seg }: { seg: SegmentOut }) {
+function drawSegmentedWaveform(
+  canvas: HTMLCanvasElement,
+  peaks: number[],
+  segments: SegmentOut[],
+  duration: number,
+) {
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const w = canvas.width
+  const h = canvas.height
+  ctx.clearRect(0, 0, w, h)
+  ctx.fillStyle = '#0b0b10'
+  ctx.fillRect(0, 0, w, h)
+
+  const n = peaks.length
+  if (n === 0 || duration <= 0) return
+
+  // Pre-compute the segment covering each bar so we don't .find() per bar.
+  // Segments are sorted by start_seconds; walk both arrays in lockstep.
+  const sorted = [...segments].sort((a, b) => a.start_seconds - b.start_seconds)
+  let segIdx = 0
+
+  const barWidth = w / n
+  const gap = barWidth > 3 ? 1 : 0
+
+  for (let i = 0; i < n; i++) {
+    const tStart = (i / n) * duration
+    while (segIdx < sorted.length && sorted[segIdx].end_seconds <= tStart) segIdx++
+    const seg = sorted[segIdx]
+    const inSeg = seg && tStart >= seg.start_seconds && tStart < seg.end_seconds
+    const fill = inSeg ? STATE_FILL[seg.state] : PENDING_FILL
+
+    const peak = Math.max(0.02, Math.min(1, peaks[i]))
+    const barH = Math.max(1, peak * (h - 2))
+    const x = i * barWidth
+    const y = (h - barH) / 2
+    ctx.fillStyle = fill
+    ctx.fillRect(x, y, Math.max(1, barWidth - gap), barH)
+  }
+}
+
+function SegmentRow({
+  seg,
+  highlighted,
+  onHoverChange,
+}: {
+  seg: SegmentOut
+  highlighted: boolean
+  onHoverChange: (id: string | null) => void
+}) {
   const styles = STATE_STYLE[seg.state]
   const primary = seg.candidates[0]
   const artwork = primary?.artwork_url
   const competitors = seg.candidates.slice(1)
   const duration = seg.end_seconds - seg.start_seconds
   return (
-    <li className="group relative flex items-stretch transition hover:bg-zinc-900/60">
+    <li
+      onMouseEnter={() => onHoverChange(seg.id)}
+      onMouseLeave={() => onHoverChange(null)}
+      className={
+        'group relative flex items-stretch transition ' +
+        (highlighted ? 'bg-zinc-800/70' : 'hover:bg-zinc-900/60')
+      }
+    >
+      {/* Left state stripe — narrow, full-height. State at a glance, no chrome. */}
       <span className={`w-[3px] shrink-0 ${styles.dot}`} aria-hidden />
 
+      {/* Artwork */}
       <div className="pl-3 pr-3 py-2.5 flex items-center">
         {artwork ? (
           <img
@@ -130,6 +309,7 @@ function SegmentRow({ seg }: { seg: SegmentOut }) {
         )}
       </div>
 
+      {/* Title block — main visual weight, single tight line + secondary muted line */}
       <div className="flex-1 min-w-0 py-2.5 pr-3 flex flex-col justify-center">
         {seg.title ? (
           <>
@@ -144,7 +324,9 @@ function SegmentRow({ seg }: { seg: SegmentOut }) {
         )}
       </div>
 
+      {/* Right rail: actions (hover-reveal) + meta (always) */}
       <div className="shrink-0 flex items-stretch">
+        {/* Action icons — Raycast-style, hover-revealed, brand-colored */}
         {seg.title && (
           <div className="px-2 py-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
             <Links urls={primary?.external_urls ?? {}} />
@@ -152,6 +334,7 @@ function SegmentRow({ seg }: { seg: SegmentOut }) {
           </div>
         )}
 
+        {/* Meta block — time range, state label, confidence. Monospaced numbers. */}
         <div className="pl-2 pr-3 py-2.5 flex flex-col items-end justify-center text-[11px] tabular-nums">
           <div className="font-mono text-zinc-300">
             {fmtTime(seg.start_seconds)}
@@ -169,6 +352,12 @@ function SegmentRow({ seg }: { seg: SegmentOut }) {
       </div>
     </li>
   )
+}
+
+function fmtDur(s: number): string {
+  const m = Math.floor(s / 60)
+  const sec = Math.round(s % 60)
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`
 }
 
 function Links({ urls }: { urls: Record<string, string> }) {
@@ -196,6 +385,8 @@ function Links({ urls }: { urls: Record<string, string> }) {
 
 function PlatformIcon({ kind }: { kind: LinkKind }) {
   const color = LINK_COLOR[kind]
+  // Simple, monochrome glyphs — recognizable by silhouette + brand color.
+  // Not the official marks (avoids trademark fuss), close enough at 14px.
   switch (kind) {
     case 'spotify':
       return (

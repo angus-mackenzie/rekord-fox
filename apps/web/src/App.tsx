@@ -1,16 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createJob, deleteJob, getJob, getTimeline, listJobs, rebuildTimeline, restartJob, uploadMedia } from './api'
+import { createJob, deleteJob, getJob, getTimeline, listJobs, pauseJob, rebuildTimeline, restartJob, resumeJob, uploadMedia } from './api'
 import type { JobOut, JobSummary, TimelineOut } from './types'
+import { AnalysisView } from './components/AnalysisView'
 import { Timeline } from './components/Timeline'
 
 type Stage = 'idle' | 'uploading' | 'analysing' | 'done' | 'error'
+
+interface MediaInfo { id: string; filename: string }
 
 export default function App() {
   const [stage, setStage] = useState<Stage>('idle')
   const [error, setError] = useState<string | null>(null)
   const [job, setJob] = useState<JobOut | null>(null)
+  const [media, setMedia] = useState<MediaInfo | null>(null)
   const [timeline, setTimeline] = useState<TimelineOut | null>(null)
   const [recent, setRecent] = useState<JobSummary[]>([])
+  // True from pause-click until the worker actually flips status to `paused`.
+  // Drives the "Pausing…" button label and a faster poll cadence so the user
+  // gets immediate feedback even when in-flight chunks haven't drained yet.
+  const [pausing, setPausing] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const refreshRecent = useCallback(async () => {
@@ -26,7 +34,9 @@ export default function App() {
     return () => { if (pollRef.current) window.clearInterval(pollRef.current) }
   }, [refreshRecent])
 
-  function startPolling(jobId: string) {
+  // intervalMs lets callers poll faster while waiting for a transition (e.g.
+  // 'pausing' → 'paused' should feel snappy).
+  function startPolling(jobId: string, intervalMs = 1000) {
     if (pollRef.current) window.clearInterval(pollRef.current)
     pollRef.current = window.setInterval(async () => {
       try {
@@ -38,12 +48,22 @@ export default function App() {
           const tl = await getTimeline(jobId)
           setTimeline(tl)
           setStage('done')
+          setPausing(false)
+          refreshRecent()
+        } else if (updated.status === 'paused') {
+          window.clearInterval(pollRef.current!)
+          pollRef.current = null
+          // Stay in the analysing stage so the AnalysisView keeps showing
+          // the waveform + partial results; the view itself will switch its
+          // primary action from Pause to Resume.
+          setPausing(false)
           refreshRecent()
         } else if (updated.status === 'failed' || updated.status === 'cancelled') {
           window.clearInterval(pollRef.current!)
           pollRef.current = null
           setError(updated.error_message ?? 'job failed')
           setStage('error')
+          setPausing(false)
           refreshRecent()
         }
       } catch (e) {
@@ -52,7 +72,7 @@ export default function App() {
         setError(String(e))
         setStage('error')
       }
-    }, 1000)
+    }, intervalMs)
   }
 
   async function handleFile(file: File) {
@@ -61,6 +81,7 @@ export default function App() {
     setStage('uploading')
     try {
       const m = await uploadMedia(file)
+      setMedia({ id: m.id, filename: m.original_filename })
       const j = await createJob(m.id)
       setJob(j)
       setStage('analysing')
@@ -75,6 +96,7 @@ export default function App() {
   async function openJob(summary: JobSummary) {
     setError(null)
     setTimeline(null)
+    setMedia({ id: summary.media_asset_id, filename: summary.media_filename })
     if (summary.status === 'succeeded') {
       try {
         const tl = await getTimeline(summary.id)
@@ -85,11 +107,17 @@ export default function App() {
         setError(String(e))
         setStage('error')
       }
-    } else if (summary.status === 'running' || summary.status === 'queued') {
+    } else if (
+      summary.status === 'running' ||
+      summary.status === 'queued' ||
+      summary.status === 'paused'
+    ) {
       const j = await getJob(summary.id)
       setJob(j)
       setStage('analysing')
-      startPolling(summary.id)
+      // Only resume the poll loop if there's actually a worker to poll for.
+      // Paused jobs sit still until the user clicks Resume.
+      if (j.status === 'running' || j.status === 'queued') startPolling(summary.id)
     } else {
       const j = await getJob(summary.id)
       setJob(j)
@@ -102,22 +130,41 @@ export default function App() {
     setStage('idle')
     setError(null)
     setJob(null)
+    setMedia(null)
     setTimeline(null)
     refreshRecent()
   }
 
-  const [rebuilding, setRebuilding] = useState(false)
-  async function handleRebuild() {
+  async function handlePause() {
     if (!job) return
-    setRebuilding(true)
+    // Optimistic UX: flip the button to "Pausing…" immediately. The worker
+    // can take seconds to drain in-flight chunks before status flips, but
+    // the user needs to know their click registered. Speed up polling so
+    // the transition lands quickly when it does.
+    setPausing(true)
+    startPolling(job.id, 400)
     try {
-      await rebuildTimeline(job.id)
-      const tl = await getTimeline(job.id)
-      setTimeline(tl)
+      await pauseJob(job.id)
+      // Don't trust the response status — the worker may not have acknowledged
+      // yet. The poll loop will clear `pausing` when it observes `paused`.
+      refreshRecent()
+    } catch (e) {
+      setPausing(false)
+      setError(String(e))
+    }
+  }
+
+  async function handleResume(jobId?: string) {
+    const id = jobId ?? job?.id
+    if (!id) return
+    try {
+      const updated = await resumeJob(id)
+      setJob(updated)
+      setStage('analysing')
+      refreshRecent()
+      startPolling(id)
     } catch (e) {
       setError(String(e))
-    } finally {
-      setRebuilding(false)
     }
   }
 
@@ -136,9 +183,25 @@ export default function App() {
     }
   }
 
+  const [rebuilding, setRebuilding] = useState(false)
+  async function handleRebuild() {
+    if (!job) return
+    setRebuilding(true)
+    try {
+      await rebuildTimeline(job.id)
+      const tl = await getTimeline(job.id)
+      setTimeline(tl)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setRebuilding(false)
+    }
+  }
+
   async function handleDelete(jobId: string) {
     try {
       await deleteJob(jobId)
+      // If the deleted job is the one we're currently looking at, return to idle.
       if (job?.id === jobId) reset()
       else refreshRecent()
     } catch (e) {
@@ -176,8 +239,19 @@ export default function App() {
         <main>
           {(stage === 'idle' || stage === 'error') && <Dropzone onFile={handleFile} />}
 
-          {stage !== 'idle' && stage !== 'done' && job && (
-            <JobStatus job={job} stage={stage} />
+          {(stage === 'uploading' || stage === 'error') && job && (
+            <JobStatus job={job} stage={stage} onReset={reset} />
+          )}
+
+          {stage === 'analysing' && job && media && (
+            <AnalysisView
+              job={job}
+              mediaId={media.id}
+              filename={media.filename}
+              pausing={pausing}
+              onPause={handlePause}
+              onResume={() => handleResume()}
+            />
           )}
 
           {error && (
@@ -203,6 +277,7 @@ export default function App() {
             activeId={job?.id ?? null}
             onOpen={openJob}
             onRestart={handleRestart}
+            onResume={handleResume}
             onDelete={handleDelete}
           />
         </aside>
@@ -243,11 +318,15 @@ function Dropzone({ onFile }: { onFile: (f: File) => void }) {
   )
 }
 
-function JobStatus({ job, stage }: { job: JobOut; stage: Stage }) {
+function JobStatus({ job, stage }: { job: JobOut; stage: Stage; onReset: () => void }) {
   const label =
     stage === 'uploading' ? 'Uploading…' :
     stage === 'analysing' ? `Analysing — ${(job.progress * 100).toFixed(0)}%` :
+    stage === 'done' ? 'Complete' :
     stage === 'error' ? 'Failed' : ''
+  // Hide the panel entirely once the timeline is showing — the timeline header
+  // already shows file + duration, and the back button is at the top.
+  if (stage === 'done') return null
   return (
     <div className="mt-4 p-4 rounded-lg bg-zinc-900 border border-zinc-800">
       <div className="flex items-center justify-between text-sm">
@@ -278,12 +357,14 @@ function RecentJobs({
   activeId,
   onOpen,
   onRestart,
+  onResume,
   onDelete,
 }: {
   jobs: JobSummary[]
   activeId: string | null
   onOpen: (j: JobSummary) => void
   onRestart: (id: string) => void
+  onResume: (id: string) => void
   onDelete: (id: string) => void
 }) {
   return (
@@ -302,6 +383,7 @@ function RecentJobs({
               active={j.id === activeId}
               onOpen={onOpen}
               onRestart={onRestart}
+              onResume={onResume}
               onDelete={onDelete}
             />
           ))}
@@ -316,15 +398,20 @@ function RecentJobRow({
   active,
   onOpen,
   onRestart,
+  onResume,
   onDelete,
 }: {
   job: JobSummary
   active: boolean
   onOpen: (j: JobSummary) => void
   onRestart: (id: string) => void
+  onResume: (id: string) => void
   onDelete: (id: string) => void
 }) {
   const canRestart = j.status === 'failed' || j.status === 'cancelled'
+  const canResume = j.status === 'paused'
+  // Two-click delete (no popup): first click arms, second click confirms.
+  // Auto-disarms after 2.5s so a stale armed state can't bite.
   const [armed, setArmed] = useState(false)
   const armTimeout = useRef<number | null>(null)
   useEffect(() => () => { if (armTimeout.current) window.clearTimeout(armTimeout.current) }, [])
@@ -356,6 +443,18 @@ function RecentJobRow({
           (armed ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100')
         }
       >
+        {canResume && !armed && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onResume(j.id) }}
+            title="Resume from where it stopped"
+            aria-label="Resume"
+            className="w-7 h-7 rounded inline-flex items-center justify-center text-emerald-300 hover:text-emerald-100 hover:bg-zinc-700"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M6 4l14 8-14 8z" />
+            </svg>
+          </button>
+        )}
         {canRestart && !armed && (
           <button
             onClick={(e) => { e.stopPropagation(); onRestart(j.id) }}
