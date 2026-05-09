@@ -11,6 +11,11 @@ config/credentials.json
 # Local media and generated analysis data
 uploads/
 media/
+# Local-only convenience symlink (worktree → repo-root data dir)
+/data
+# Backend default storage (config.py points here when running `uvicorn`
+# from apps/backend); media + DB + waveform cache live here, never committed.
+apps/backend/data/
 data/media/
 data/uploads/
 data/audio-cache/
