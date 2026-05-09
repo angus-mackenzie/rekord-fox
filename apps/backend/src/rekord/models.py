@@ -104,6 +104,34 @@ class TimelineSegment(SQLModel, table=True):
     job: AnalysisJob | None = Relationship(back_populates="segments")
 
 
+class ManualCorrection(SQLModel, table=True):
+    """User-authored tag for a region of a mix.
+
+    Per docs/DATA_MODEL.md, manual corrections layer over generated timeline
+    data rather than destroying provider evidence. The tuple
+    (analysis_job → media, start_seconds, end_seconds, title, artist) is
+    the seed for future re-identification: a fingerprint provider walks
+    these rows, calls audio.clip.extract_audio_clip(media, start, end) on
+    each, and indexes the result. The model does not assume any particular
+    fingerprinting strategy — it just records what the user asserted.
+    """
+
+    __tablename__ = "manual_corrections"
+
+    id: str = Field(default_factory=_uuid, primary_key=True)
+    analysis_job_id: str = Field(foreign_key="analysis_jobs.id", index=True)
+    # Action mirrors docs/DATA_MODEL.md. v1 only emits 'add'; reserved for
+    # future split/merge/replace operations without a schema change.
+    action: str = Field(default="add")
+    start_seconds: float
+    end_seconds: float
+    title: str | None = None
+    artist: str | None = None
+    notes: str | None = None
+    external_urls: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=_now)
+
+
 class ChunkAttempt(SQLModel, table=True):
     """Records that a (start, end) window has been attempted for a job.
 
