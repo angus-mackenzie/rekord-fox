@@ -7,8 +7,9 @@ import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import select
 
 from ..audio.ffmpeg import file_checksum, probe_duration
@@ -19,12 +20,20 @@ from ..models import (
     AnalysisJob,
     ChunkAttempt,
     JobStatus,
+    ManualCorrection,
     MediaAsset,
     TimelineSegment,
     TrackCandidate,
 )
 from ..worker.pipeline import request_pause, run_analysis
-from .schemas import JobOut, MediaOut, SegmentOut, TimelineOut
+from .schemas import (
+    JobOut,
+    ManualTagCreate,
+    ManualTagOut,
+    MediaOut,
+    SegmentOut,
+    TimelineOut,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
@@ -162,6 +171,79 @@ async def list_jobs(limit: int = 20) -> list[dict]:
         ]
 
 
+@app.get("/media/{media_id}/audio")
+async def get_media_audio(media_id: str, request: Request):
+    """Stream the raw uploaded audio with HTTP Range support.
+
+    Range matters for the browser <audio> element to seek (and for some
+    formats to even start playback efficiently). Without it, scrubbing in
+    the player downloads from byte 0 every time.
+    """
+    with session_scope() as s:
+        media = s.get(MediaAsset, media_id)
+        if media is None:
+            raise HTTPException(404, "media not found")
+        path = Path(media.storage_path)
+        content_type = media.content_type or "application/octet-stream"
+    if not path.exists():
+        raise HTTPException(410, "underlying media file is gone")
+
+    return _serve_with_range(path, content_type, request)
+
+
+def _serve_with_range(path: Path, content_type: str, request: Request) -> Response:
+    """Tiny single-range HTTP/1.1 Range responder.
+
+    Handles `Range: bytes=start-end` (open-ended end allowed). Falls back to
+    a normal FileResponse when no Range header is present. Multi-range
+    requests are not supported (the browser <audio> element never sends them).
+    """
+    file_size = path.stat().st_size
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    if not range_header or not range_header.startswith("bytes="):
+        # Set Accept-Ranges so browsers know seek is possible on the next request.
+        return FileResponse(
+            path, media_type=content_type, headers={"Accept-Ranges": "bytes"}
+        )
+
+    try:
+        spec = range_header.removeprefix("bytes=").split(",", 1)[0].strip()
+        start_s, _, end_s = spec.partition("-")
+        start = int(start_s) if start_s else 0
+        end = int(end_s) if end_s else file_size - 1
+    except ValueError as exc:
+        raise HTTPException(400, f"bad Range header: {exc}") from exc
+    if start < 0 or end >= file_size or start > end:
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    chunk_bytes = end - start + 1
+
+    def iter_file():
+        with path.open("rb") as f:
+            f.seek(start)
+            remaining = chunk_bytes
+            while remaining > 0:
+                buf = f.read(min(64 * 1024, remaining))
+                if not buf:
+                    break
+                remaining -= len(buf)
+                yield buf
+
+    return StreamingResponse(
+        iter_file(),
+        status_code=206,
+        media_type=content_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(chunk_bytes),
+        },
+    )
+
+
 @app.get("/media/{media_id}/waveform")
 async def get_waveform(media_id: str, bins: int = 800) -> dict:
     bins = max(64, min(2000, bins))
@@ -217,25 +299,22 @@ async def get_job_candidates(job_id: str) -> list[dict]:
 
 @app.delete("/jobs/{job_id}", status_code=204)
 async def delete_job(job_id: str) -> None:
-    """Delete a job and its candidates + segments. Media file is left in place
-    in case other jobs reference it."""
+    """Delete a job and its candidates + segments + attempts + manual tags.
+    Media file is left in place in case other jobs reference it.
+
+    Uses bulk SQL deletes (not session.delete) so the dependent rows go
+    before the parent row in a single, ordered transaction — SQLModel's ORM
+    delete reorders by its own dependency graph and trips the FK constraint
+    when a relationship isn't declared back-populating.
+    """
+    from sqlalchemy import delete as sql_delete
+
     with session_scope() as s:
-        job = s.get(AnalysisJob, job_id)
-        if job is None:
+        if s.get(AnalysisJob, job_id) is None:
             raise HTTPException(404, "job not found")
-        for cand in s.exec(
-            select(TrackCandidate).where(TrackCandidate.analysis_job_id == job_id)
-        ).all():
-            s.delete(cand)
-        for seg in s.exec(
-            select(TimelineSegment).where(TimelineSegment.analysis_job_id == job_id)
-        ).all():
-            s.delete(seg)
-        for att in s.exec(
-            select(ChunkAttempt).where(ChunkAttempt.analysis_job_id == job_id)
-        ).all():
-            s.delete(att)
-        s.delete(job)
+        for model in (TrackCandidate, TimelineSegment, ChunkAttempt, ManualCorrection):
+            s.exec(sql_delete(model).where(model.analysis_job_id == job_id))
+        s.exec(sql_delete(AnalysisJob).where(AnalysisJob.id == job_id))
         s.commit()
 
 
@@ -382,6 +461,11 @@ async def get_timeline(job_id: str) -> TimelineOut:
             .where(TimelineSegment.analysis_job_id == job_id)
             .order_by(TimelineSegment.start_seconds, TimelineSegment.id)
         ).all()
+        manual_tags = s.exec(
+            select(ManualCorrection)
+            .where(ManualCorrection.analysis_job_id == job_id)
+            .order_by(ManualCorrection.start_seconds, ManualCorrection.id)
+        ).all()
         # Count candidates so the UI can decide whether Rebuild is meaningful.
         from sqlalchemy import func
 
@@ -394,8 +478,43 @@ async def get_timeline(job_id: str) -> TimelineOut:
             job=JobOut.model_validate(job, from_attributes=True),
             media=MediaOut.model_validate(media, from_attributes=True),
             segments=[SegmentOut.model_validate(s_, from_attributes=True) for s_ in segments],
+            manual_tags=[ManualTagOut.model_validate(t, from_attributes=True) for t in manual_tags],
             candidate_count=int(candidate_count or 0),
         )
+
+
+@app.post("/jobs/{job_id}/manual-tags", response_model=ManualTagOut, status_code=201)
+async def create_manual_tag(job_id: str, payload: ManualTagCreate) -> ManualTagOut:
+    if payload.end_seconds <= payload.start_seconds:
+        raise HTTPException(400, "end_seconds must be greater than start_seconds")
+    with session_scope() as s:
+        job = s.get(AnalysisJob, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        tag = ManualCorrection(
+            analysis_job_id=job_id,
+            action="add",
+            start_seconds=payload.start_seconds,
+            end_seconds=payload.end_seconds,
+            title=payload.title,
+            artist=payload.artist,
+            notes=payload.notes,
+            external_urls=dict(payload.external_urls or {}),
+        )
+        s.add(tag)
+        s.commit()
+        s.refresh(tag)
+        return ManualTagOut.model_validate(tag, from_attributes=True)
+
+
+@app.delete("/manual-tags/{tag_id}", status_code=204)
+async def delete_manual_tag(tag_id: str) -> None:
+    with session_scope() as s:
+        tag = s.get(ManualCorrection, tag_id)
+        if tag is None:
+            raise HTTPException(404, "manual tag not found")
+        s.delete(tag)
+        s.commit()
 
 
 def _short_uuid() -> str:
