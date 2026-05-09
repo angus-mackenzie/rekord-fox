@@ -1,28 +1,39 @@
 set shell := ["bash", "-cu"]
 
+backend := "apps/backend"
+web     := "apps/web"
+
 setup:
-    @echo "No application scaffold exists yet. Install toolchains when apps/web and services/api are added."
+    @if [ ! -d {{backend}}/.venv ]; then python3 -m venv {{backend}}/.venv; fi
+    {{backend}}/.venv/bin/pip install -q -e "{{backend}}[dev]"
+    cd {{web}} && npm install --silent
+
+dev-api:
+    cd {{backend}} && .venv/bin/uvicorn rekord.api.main:app --reload --host 127.0.0.1 --port 8000
+
+dev-web:
+    cd {{web}} && npm run dev
 
 dev:
-    @echo "No application scaffold exists yet. Add apps/web, services/api, and services/worker before starting dev servers."
+    @echo "Run 'just dev-api' in one terminal and 'just dev-web' in another."
 
 lint:
-    @bash scripts/check-claude-readiness.sh
+    cd {{backend}} && .venv/bin/ruff check src tests
+    cd {{web}} && npm run lint --silent
 
 typecheck:
-    @echo "No TypeScript or Python application scaffold exists yet. Typecheck skipped."
+    cd {{backend}} && .venv/bin/mypy src || true
+    cd {{web}} && npx tsc -b
 
-test:
-    @bash scripts/check-claude-readiness.sh
+test: test-backend test-web
 
 test-backend:
-    @echo "No backend scaffold exists yet. Backend tests skipped."
+    cd {{backend}} && .venv/bin/pytest
 
 test-web:
-    @echo "No web scaffold exists yet. Web tests skipped."
+    cd {{web}} && npx tsc -b
 
-check:
-    @bash scripts/check-claude-readiness.sh
-    @just typecheck
-    @just test-backend
-    @just test-web
+check: lint typecheck test
+
+identify FILE PROVIDER='shazam':
+    cd {{backend}} && .venv/bin/python scripts/identify.py "../../{{FILE}}" --provider {{PROVIDER}}
