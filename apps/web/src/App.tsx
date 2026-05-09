@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createJob, deleteJob, getJob, getTimeline, listJobs, pauseJob, rebuildTimeline, restartJob, resumeJob, uploadMedia } from './api'
-import type { JobOut, JobSummary, TimelineOut } from './types'
+import {
+  createJob, createManualTag, deleteJob, deleteManualTag, getJob, getTimeline,
+  listJobs, pauseJob, rebuildTimeline, restartJob, resumeJob, uploadMedia,
+} from './api'
+import type { JobOut, JobSummary, ManualTagInput, TimelineOut } from './types'
 import { AnalysisView } from './components/AnalysisView'
 import { Timeline } from './components/Timeline'
 
@@ -209,6 +212,22 @@ export default function App() {
     }
   }
 
+  async function handleCreateTag(input: ManualTagInput) {
+    if (!job) return
+    await createManualTag(job.id, input)
+    // Refresh the timeline so the new tag shows up everywhere it lives
+    // (waveform band + segment list + count in header).
+    const tl = await getTimeline(job.id)
+    setTimeline(tl)
+  }
+
+  async function handleDeleteTag(tagId: string) {
+    if (!job) return
+    await deleteManualTag(tagId)
+    const tl = await getTimeline(job.id)
+    setTimeline(tl)
+  }
+
   const showBack = stage !== 'idle'
 
   return (
@@ -268,7 +287,15 @@ export default function App() {
             </div>
           )}
 
-          {timeline && <Timeline timeline={timeline} onRebuild={handleRebuild} rebuilding={rebuilding} />}
+          {timeline && (
+            <Timeline
+              timeline={timeline}
+              onRebuild={handleRebuild}
+              rebuilding={rebuilding}
+              onCreateTag={handleCreateTag}
+              onDeleteTag={handleDeleteTag}
+            />
+          )}
         </main>
 
         <aside>

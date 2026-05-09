@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { getWaveform } from '../api'
-import type { SegmentOut, SegmentState, TimelineOut, WaveformOut } from '../types'
+import { audioUrl, getWaveform } from '../api'
+import { useAudioPlayer } from '../hooks/useAudioPlayer'
+import type { ManualTag, ManualTagInput, SegmentOut, SegmentState, TimelineOut, WaveformOut } from '../types'
+import { TagModal } from './TagModal'
+
+// Manual user-authored tags get a distinct accent so they're never confused
+// with provider-generated segments.
+const MANUAL_DOT = 'bg-violet-300'
 
 const STATE_STYLE: Record<SegmentState, { dot: string; label: string; border: string }> = {
   confirmed:  { dot: 'bg-emerald-400',  label: 'text-emerald-300',  border: 'border-emerald-700/60' },
@@ -51,31 +57,70 @@ export function Timeline({
   timeline,
   onRebuild,
   rebuilding,
+  onCreateTag,
+  onDeleteTag,
 }: {
   timeline: TimelineOut
   onRebuild?: () => void
   rebuilding?: boolean
+  onCreateTag?: (input: ManualTagInput) => Promise<void>
+  onDeleteTag?: (tagId: string) => Promise<void>
 }) {
-  const { segments, media } = timeline
+  const { segments, media, manual_tags } = timeline
   const duration = media.duration_seconds ?? 0
-  // Hover state lives here so a row hover highlights its waveform region and
-  // a waveform hover highlights the matching row — bidirectional cross-link.
-  // Deliberately no auto-scroll: yanking the page on every cursor move makes
-  // it impossible to navigate between the waveform and a row out of view.
+
+  // Hover state for bidirectional waveform↔row highlight.
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  // Region selected by drag on the waveform — null until the user releases.
+  const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null)
+  // Tag modal visibility (driven from the selection).
+  const [modalOpen, setModalOpen] = useState(false)
+
+  // Audio playback shared by header button + waveform cursor + click-to-seek.
+  const audio = useAudioPlayer(audioUrl(media.id))
+
+  async function handleSave(input: ManualTagInput) {
+    if (!onCreateTag) return
+    await onCreateTag(input)
+    setPendingSelection(null)
+    setModalOpen(false)
+  }
 
   return (
     <div className="mt-6">
       <div className="flex items-center gap-3 text-sm text-zinc-400 mb-2">
         <span className="truncate">
           {media.original_filename} · {fmtTime(duration)} · {segments.length} segments
+          {manual_tags.length > 0 && (
+            <span className="text-violet-300 ml-1">· {manual_tags.length} tagged</span>
+          )}
         </span>
+        <button
+          onClick={audio.togglePlay}
+          title={audio.isPlaying ? 'Pause' : 'Play'}
+          aria-label={audio.isPlaying ? 'Pause' : 'Play'}
+          className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-200"
+        >
+          {audio.isPlaying ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="4" width="4" height="16" rx="1" />
+              <rect x="14" y="4" width="4" height="16" rx="1" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M6 4l14 8-14 8z" />
+            </svg>
+          )}
+          <span className="font-mono tabular-nums">
+            {fmtTime(audio.currentTime)} / {fmtTime(duration)}
+          </span>
+        </button>
         {onRebuild && timeline.candidate_count > 0 && (
           <button
             onClick={onRebuild}
             disabled={rebuilding}
             title="Re-fuse segments from existing matches using the latest algorithm. No re-analysis."
-            className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
+            className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -90,20 +135,57 @@ export function Timeline({
           mediaId={media.id}
           duration={duration}
           segments={segments}
+          manualTags={manual_tags}
           hoveredId={hoveredId}
           onHoverChange={setHoveredId}
+          playbackTime={audio.currentTime}
+          onSeek={audio.seek}
+          pendingSelection={pendingSelection}
+          onSelectionChange={setPendingSelection}
+          onTagClick={() => setModalOpen(true)}
+          taggingEnabled={!!onCreateTag}
         />
       )}
-      <ul className="mt-4 rounded-lg border border-zinc-800/70 divide-y divide-zinc-800/70 overflow-hidden">
-        {segments.map((seg) => (
-          <SegmentRow
-            key={seg.id}
-            seg={seg}
-            highlighted={seg.id === hoveredId}
-            onHoverChange={setHoveredId}
-          />
-        ))}
-      </ul>
+
+      {(segments.length > 0 || manual_tags.length > 0) && (
+        <ul className="mt-4 rounded-lg border border-zinc-800/70 divide-y divide-zinc-800/70 overflow-hidden">
+          {[
+            ...manual_tags.map((t) => ({ kind: 'manual' as const, t })),
+            ...segments.map((s) => ({ kind: 'segment' as const, s })),
+          ]
+            .sort((a, b) => {
+              const aStart = a.kind === 'manual' ? a.t.start_seconds : a.s.start_seconds
+              const bStart = b.kind === 'manual' ? b.t.start_seconds : b.s.start_seconds
+              return aStart - bStart
+            })
+            .map((row) => row.kind === 'manual' ? (
+              <ManualTagRow
+                key={`m:${row.t.id}`}
+                tag={row.t}
+                highlighted={row.t.id === hoveredId}
+                onHoverChange={setHoveredId}
+                onDelete={onDeleteTag ? () => onDeleteTag(row.t.id) : undefined}
+                onSeek={audio.seek}
+              />
+            ) : (
+              <SegmentRow
+                key={row.s.id}
+                seg={row.s}
+                highlighted={row.s.id === hoveredId}
+                onHoverChange={setHoveredId}
+              />
+            ))}
+        </ul>
+      )}
+
+      {modalOpen && pendingSelection && onCreateTag && (
+        <TagModal
+          startSeconds={pendingSelection.start}
+          endSeconds={pendingSelection.end}
+          onCancel={() => setModalOpen(false)}
+          onSave={handleSave}
+        />
+      )}
     </div>
   )
 }
@@ -119,20 +201,41 @@ function WaveformBar({
   mediaId,
   duration,
   segments,
+  manualTags,
   hoveredId,
   onHoverChange,
+  playbackTime,
+  onSeek,
+  pendingSelection,
+  onSelectionChange,
+  onTagClick,
+  taggingEnabled,
 }: {
   mediaId: string
   duration: number
   segments: SegmentOut[]
+  manualTags: ManualTag[]
   hoveredId: string | null
   onHoverChange: (id: string | null) => void
+  playbackTime: number
+  onSeek: (seconds: number) => void
+  pendingSelection: { start: number; end: number } | null
+  onSelectionChange: (s: { start: number; end: number } | null) => void
+  onTagClick: () => void
+  taggingEnabled: boolean
 }) {
   const [waveform, setWaveform] = useState<WaveformOut | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [hoverX, setHoverX] = useState<number | null>(null)
+  // Live drag state — independent of the committed `pendingSelection` so the
+  // band updates fluidly during the drag without round-tripping through the
+  // parent on every mouse-move.
+  const dragRef = useRef<{ startTime: number } | null>(null)
+  const [liveSelection, setLiveSelection] = useState<{ start: number; end: number } | null>(null)
   const hoveredSeg = hoveredId ? segments.find((s) => s.id === hoveredId) ?? null : null
+  const hoveredTag = hoveredId ? manualTags.find((t) => t.id === hoveredId) ?? null : null
+  const selection = liveSelection ?? pendingSelection
 
   useEffect(() => {
     let alive = true
@@ -140,7 +243,6 @@ function WaveformBar({
     return () => { alive = false }
   }, [mediaId])
 
-  // HiDPI fit + redraw on resize / data change.
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas || !waveform) return
@@ -159,31 +261,89 @@ function WaveformBar({
     return () => window.removeEventListener('resize', fit)
   }, [waveform, segments, duration])
 
-  function onMouseMove(e: React.MouseEvent) {
+  function eventToTime(e: React.MouseEvent | MouseEvent): { x: number; t: number } | null {
     const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const x = e.clientX - rect.left
-    const frac = Math.max(0, Math.min(1, x / rect.width))
-    const t = frac * duration
-    const seg = segments.find((s) => t >= s.start_seconds && t < s.end_seconds) ?? null
-    setHoverX(x)
-    onHoverChange(seg?.id ?? null)
+    if (!rect) return null
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+    const t = (x / Math.max(1, rect.width)) * duration
+    return { x, t }
+  }
+
+  function onMouseDown(e: React.MouseEvent) {
+    if (e.button !== 0) return
+    const pt = eventToTime(e)
+    if (!pt) return
+    // Start a drag — but don't commit a selection yet. If the user just
+    // releases without moving, this becomes a click-to-seek (handled in
+    // mouseUp below).
+    dragRef.current = { startTime: pt.t }
+    setLiveSelection(null)
+    onSelectionChange(null)
+  }
+
+  function onMouseMove(e: React.MouseEvent) {
+    const pt = eventToTime(e)
+    if (!pt) return
+    setHoverX(pt.x)
+
+    if (dragRef.current) {
+      const { startTime } = dragRef.current
+      const start = Math.min(startTime, pt.t)
+      const end = Math.max(startTime, pt.t)
+      // Only treat it as a real selection once the user has moved a meaningful
+      // amount; this preserves the "click to seek" affordance.
+      if (Math.abs(end - start) >= 0.25) setLiveSelection({ start, end })
+      return
+    }
+
+    const seg = segments.find((s) => pt.t >= s.start_seconds && pt.t < s.end_seconds)
+    const tag = manualTags.find((t) => pt.t >= t.start_seconds && pt.t < t.end_seconds)
+    // Manual tags win for hover identification — they're the user's intent.
+    onHoverChange(tag?.id ?? seg?.id ?? null)
+  }
+
+  function onMouseUp(e: React.MouseEvent) {
+    const wasDragging = dragRef.current !== null
+    const moved = liveSelection !== null
+    dragRef.current = null
+    if (!wasDragging) return
+    if (moved && liveSelection) {
+      onSelectionChange(liveSelection)
+      setLiveSelection(null)
+    } else {
+      // Click without drag → seek the audio cursor here.
+      const pt = eventToTime(e)
+      if (pt) onSeek(pt.t)
+    }
   }
 
   function onMouseLeave() {
     setHoverX(null)
     onHoverChange(null)
+    if (dragRef.current && liveSelection) {
+      onSelectionChange(liveSelection)
+      setLiveSelection(null)
+    }
+    dragRef.current = null
   }
 
   const containerW = containerRef.current?.clientWidth ?? 0
   const tooltipText = hoverX != null ? fmtTime((hoverX / Math.max(1, containerW)) * duration) : null
+  const hoveredHighlight = hoveredSeg
+    ? { start: hoveredSeg.start_seconds, end: hoveredSeg.end_seconds }
+    : hoveredTag
+      ? { start: hoveredTag.start_seconds, end: hoveredTag.end_seconds }
+      : null
 
   return (
     <div
       ref={containerRef}
-      className="relative rounded-lg bg-zinc-950 border border-zinc-800 overflow-hidden"
+      className="relative rounded-lg bg-zinc-950 border border-zinc-800 overflow-hidden select-none"
+      onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
+      onMouseUp={onMouseUp}
       onMouseLeave={onMouseLeave}
+      style={{ cursor: dragRef.current ? 'ew-resize' : 'crosshair' }}
     >
       <canvas ref={canvasRef} className="block w-full" style={{ height: 96 }} />
       {!waveform && (
@@ -192,19 +352,71 @@ function WaveformBar({
         </div>
       )}
 
-      {/* Region highlight for the currently-hovered segment (from either side). */}
-      {hoveredSeg && duration > 0 && (
+      {/* Manual-tag bands — full-height, always visible (taggingEnabled=false
+          still shows existing tags, just hides the Tag-this affordance). */}
+      {duration > 0 && manualTags.map((tag) => (
+        <div
+          key={tag.id}
+          className="absolute top-0 bottom-0 pointer-events-none border-l border-r border-violet-300/70"
+          style={{
+            left: `${(tag.start_seconds / duration) * 100}%`,
+            width: `${((tag.end_seconds - tag.start_seconds) / duration) * 100}%`,
+            background: 'rgba(196, 181, 253, 0.18)',
+          }}
+          title={tag.title ?? 'manual tag'}
+        />
+      ))}
+
+      {/* Hover region (segment OR manual tag). */}
+      {hoveredHighlight && duration > 0 && (
         <div
           className="absolute top-0 bottom-0 pointer-events-none ring-2 ring-white/70 bg-white/10 transition-[left,width] duration-100"
           style={{
-            left: `${(hoveredSeg.start_seconds / duration) * 100}%`,
-            width: `${((hoveredSeg.end_seconds - hoveredSeg.start_seconds) / duration) * 100}%`,
+            left: `${(hoveredHighlight.start / duration) * 100}%`,
+            width: `${((hoveredHighlight.end - hoveredHighlight.start) / duration) * 100}%`,
           }}
         />
       )}
 
-      {/* Cursor line + tooltip when hovering directly on the waveform. */}
-      {hoverX != null && waveform && (
+      {/* Pending / live drag selection — solid violet outline so it stands
+          apart from the hover highlight. Tag button anchors to its end. */}
+      {selection && duration > 0 && (
+        <>
+          <div
+            className="absolute top-0 bottom-0 pointer-events-none ring-2 ring-violet-400 bg-violet-400/15"
+            style={{
+              left: `${(selection.start / duration) * 100}%`,
+              width: `${((selection.end - selection.start) / duration) * 100}%`,
+            }}
+          />
+          {pendingSelection && taggingEnabled && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onTagClick() }}
+              className="absolute -bottom-9 px-2.5 py-1 rounded-md bg-violet-500 hover:bg-violet-400 text-white text-xs font-medium shadow-lg z-10"
+              style={{
+                left: `${(pendingSelection.start / duration) * 100}%`,
+              }}
+            >
+              + Tag {fmtTime(pendingSelection.start)}–{fmtTime(pendingSelection.end)}
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Playback cursor — pink, doesn't disappear when mouse leaves. */}
+      {duration > 0 && playbackTime > 0 && (
+        <div
+          className="absolute top-0 bottom-0 w-px bg-pink-400 pointer-events-none"
+          style={{
+            left: `${(playbackTime / duration) * 100}%`,
+            boxShadow: '0 0 6px rgba(244, 114, 182, 0.7)',
+          }}
+        />
+      )}
+
+      {/* Hover cursor + time tooltip. Suppressed during drag — the selection
+          band already shows the range. */}
+      {hoverX != null && waveform && !dragRef.current && (
         <>
           <div
             className="absolute top-0 bottom-0 w-px bg-zinc-200/50 pointer-events-none"
@@ -217,6 +429,9 @@ function WaveformBar({
             <span className="font-mono tabular-nums">{tooltipText}</span>
             {hoveredSeg?.title && (
               <span className="text-zinc-400"> · {hoveredSeg.title}</span>
+            )}
+            {hoveredTag?.title && (
+              <span className="text-violet-300"> · {hoveredTag.title}</span>
             )}
           </div>
         </>
@@ -358,6 +573,118 @@ function fmtDur(s: number): string {
   const m = Math.floor(s / 60)
   const sec = Math.round(s % 60)
   return m > 0 ? `${m}m ${sec}s` : `${sec}s`
+}
+
+function ManualTagRow({
+  tag,
+  highlighted,
+  onHoverChange,
+  onDelete,
+  onSeek,
+}: {
+  tag: ManualTag
+  highlighted: boolean
+  onHoverChange: (id: string | null) => void
+  onDelete?: () => Promise<void>
+  onSeek: (seconds: number) => void
+}) {
+  const duration = tag.end_seconds - tag.start_seconds
+  // Two-click confirm for delete (matches the Recent panel pattern, no popups).
+  const [armed, setArmed] = useState(false)
+  const armTimeout = useRef<number | null>(null)
+  useEffect(() => () => { if (armTimeout.current) window.clearTimeout(armTimeout.current) }, [])
+  function arm() {
+    setArmed(true)
+    if (armTimeout.current) window.clearTimeout(armTimeout.current)
+    armTimeout.current = window.setTimeout(() => setArmed(false), 2500)
+  }
+  return (
+    <li
+      onMouseEnter={() => onHoverChange(tag.id)}
+      onMouseLeave={() => onHoverChange(null)}
+      className={
+        'group relative flex items-stretch transition ' +
+        (highlighted ? 'bg-zinc-800/70' : 'hover:bg-zinc-900/60')
+      }
+    >
+      {/* Distinct violet stripe: this row is user-authored, not provider output. */}
+      <span className={`w-[3px] shrink-0 ${MANUAL_DOT}`} aria-hidden />
+
+      <div className="pl-3 pr-3 py-2.5 flex items-center">
+        <div className="w-9 h-9 rounded shrink-0 bg-violet-500/15 ring-1 ring-violet-400/40 flex items-center justify-center">
+          {/* tag/star glyph — user-authored */}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-violet-300" aria-hidden="true">
+            <path d="M20.5 13.5l-8 8a1 1 0 01-1.4 0L2.5 13a1 1 0 01-.3-.7V4a2 2 0 012-2h8a1 1 0 01.7.3l8.6 8.6a1 1 0 010 1.4l-1 1.2z" />
+            <circle cx="7" cy="7" r="1.2" fill="currentColor" />
+          </svg>
+        </div>
+      </div>
+
+      <div className="flex-1 min-w-0 py-2.5 pr-3 flex flex-col justify-center">
+        <div className="flex items-baseline gap-2">
+          <div className="truncate text-[13.5px] leading-tight text-zinc-100">
+            {tag.title || tag.artist || 'Untitled tag'}
+          </div>
+          <span className="shrink-0 px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300 text-[10px] uppercase tracking-wider">
+            manual
+          </span>
+        </div>
+        <div className="truncate text-[11.5px] leading-tight text-zinc-500 mt-0.5">
+          {tag.artist}
+          {tag.notes && <span className="text-zinc-600"> · {tag.notes}</span>}
+        </div>
+      </div>
+
+      <div className="shrink-0 flex items-stretch">
+        <div className="px-2 py-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+          <button
+            onClick={(e) => { e.stopPropagation(); onSeek(tag.start_seconds) }}
+            title="Play from this tag"
+            aria-label="Play from this tag"
+            className="w-7 h-7 inline-flex items-center justify-center rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800 transition"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M6 4l14 8-14 8z" />
+            </svg>
+          </button>
+          <Links urls={tag.external_urls} />
+          {onDelete && (armed ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); setArmed(false); void onDelete() }}
+              onMouseLeave={() => setArmed(false)}
+              className="px-2 py-1 rounded text-[11px] font-medium bg-red-600 hover:bg-red-500 text-white"
+            >
+              Confirm delete
+            </button>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); arm() }}
+              title="Delete this tag"
+              aria-label="Delete tag"
+              className="w-7 h-7 inline-flex items-center justify-center rounded-md text-zinc-400 hover:text-red-300 hover:bg-zinc-800 transition"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 6L6 18" /><path d="M6 6l12 12" />
+              </svg>
+            </button>
+          ))}
+        </div>
+
+        <div className="pl-2 pr-3 py-2.5 flex flex-col items-end justify-center text-[11px] tabular-nums">
+          <div className="font-mono text-zinc-300">
+            {fmtTime(tag.start_seconds)}
+            <span className="text-zinc-600">–</span>
+            {fmtTime(tag.end_seconds)}
+          </div>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <span className="text-zinc-500 font-mono">{fmtDur(duration)}</span>
+          </div>
+        </div>
+      </div>
+    </li>
+  )
 }
 
 function Links({ urls }: { urls: Record<string, string> }) {

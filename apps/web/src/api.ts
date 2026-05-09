@@ -1,4 +1,7 @@
-import type { ChunkCandidate, JobOut, JobSummary, MediaOut, TimelineOut, WaveformOut } from './types'
+import type {
+  ChunkCandidate, JobOut, JobSummary, ManualTag, ManualTagInput,
+  MediaOut, TimelineOut, WaveformOut,
+} from './types'
 
 const BASE = '/api'
 
@@ -81,5 +84,24 @@ export async function rebuildTimeline(jobId: string): Promise<JobOut> {
 
 export async function deleteJob(jobId: string): Promise<void> {
   const r = await fetch(`${BASE}/jobs/${jobId}`, { method: 'DELETE' })
+  if (!r.ok && r.status !== 204) throw new Error(`${r.status} ${r.statusText}`)
+}
+
+// URL helper for the audio element's `src`. Range support is handled by the
+// backend; the browser issues partial requests when the user seeks.
+export function audioUrl(mediaId: string): string {
+  return `${BASE}/media/${mediaId}/audio`
+}
+
+export async function createManualTag(jobId: string, input: ManualTagInput): Promise<ManualTag> {
+  return request<ManualTag>(`/jobs/${jobId}/manual-tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function deleteManualTag(tagId: string): Promise<void> {
+  const r = await fetch(`${BASE}/manual-tags/${tagId}`, { method: 'DELETE' })
   if (!r.ok && r.status !== 204) throw new Error(`${r.status} ${r.statusText}`)
 }

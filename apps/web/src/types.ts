@@ -44,10 +44,33 @@ export interface SegmentOut {
   notes: string | null
 }
 
+export interface ManualTag {
+  id: string
+  analysis_job_id: string
+  action: 'add'
+  start_seconds: number
+  end_seconds: number
+  title: string | null
+  artist: string | null
+  notes: string | null
+  external_urls: Record<string, string>
+  created_at: string
+}
+
+export interface ManualTagInput {
+  start_seconds: number
+  end_seconds: number
+  title?: string
+  artist?: string
+  notes?: string
+  external_urls?: Record<string, string>
+}
+
 export interface TimelineOut {
   job: JobOut
   media: MediaOut
   segments: SegmentOut[]
+  manual_tags: ManualTag[]
   candidate_count: number
 }
 
