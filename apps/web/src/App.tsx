@@ -228,29 +228,29 @@ export default function App() {
     setTimeline(tl)
   }
 
-  const showBack = stage !== 'idle'
-
   return (
     <div className="min-h-screen p-6 max-w-5xl mx-auto">
       <header className="mb-6 flex items-center gap-3">
+        {/* Logo + title is the single home affordance — clicking it resets to
+            the upload screen. Position is anchored to the page padding so it
+            lines up with the dropzone / segment list below it. */}
         <button
           onClick={reset}
-          aria-label="Back to upload"
-          title="Back to upload"
-          className={
-            'shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg border ' +
-            'border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 transition ' +
-            (showBack ? '' : 'invisible')
-          }
+          className="flex items-center gap-2.5 group focus:outline-none"
+          aria-label="Rekord Fox — home"
+          title={stage === 'idle' ? undefined : 'Back to upload'}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M19 12H5" /><path d="M12 19l-7-7 7-7" />
-          </svg>
+          <img
+            src="/favicon.png"
+            alt=""
+            width={32}
+            height={32}
+            className="w-8 h-8 rounded-md shrink-0 ring-1 ring-zinc-800 group-hover:ring-violet-400/60 transition"
+          />
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-100 group-hover:text-violet-300 transition">
+            Rekord Fox
+          </h1>
         </button>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          <button onClick={reset} className="hover:text-violet-300 transition">Rekord-Fox</button>
-        </h1>
         <span className="ml-auto text-xs text-zinc-400">self-hosted track ID for DJ mixes</span>
       </header>
 

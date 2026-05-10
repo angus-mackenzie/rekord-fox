@@ -786,18 +786,23 @@ function SegmentRow({
         )}
       </div>
 
-      {/* Right rail: actions (hover-reveal) + meta (always) */}
+      {/* Right rail: actions + meta. Both have fixed widths so the dividers
+          and meta blocks line up vertically across rows. The +N popover
+          slot is always reserved (invisible when no competitors) so its
+          presence on some rows doesn't shift everything else. */}
       <div className="shrink-0 flex items-stretch">
-        {/* Action icons — Raycast-style, hover-revealed, brand-colored */}
         {seg.title && (
-          <div className="px-2 py-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
-            <Links urls={primary?.external_urls ?? {}} />
-            {competitors.length > 0 && <CompetitorsPopover competitors={competitors} />}
+          <div className="px-2 py-2 flex items-center gap-0.5 transition">
+            <Links urls={primary?.external_urls ?? {}} title={seg.title} artist={seg.artist} />
+            <div className="w-7 shrink-0 flex items-center justify-center">
+              {competitors.length > 0 && <CompetitorsPopover competitors={competitors} />}
+            </div>
           </div>
         )}
 
-        {/* Meta block — time range, state label, confidence. Monospaced numbers. */}
-        <div className="pl-2 pr-3 py-2.5 flex flex-col items-end justify-center text-[11px] tabular-nums">
+        {/* Meta block — fixed width so the duration string ("20s" vs
+            "1m 35s") doesn't wobble the actions cluster's right edge. */}
+        <div className="pl-2 pr-3 py-2.5 w-48 flex flex-col items-end justify-center text-[11px] tabular-nums">
           <div className="font-mono text-zinc-300">
             {fmtTime(seg.start_seconds)}
             <span className="text-zinc-600">–</span>
@@ -884,7 +889,7 @@ function ManualTagRow({
       </div>
 
       <div className="shrink-0 flex items-stretch">
-        <div className="px-2 py-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+        <div className="px-2 py-2 flex items-center gap-0.5 transition">
           <button
             onClick={(e) => { e.stopPropagation(); onSeek(tag.start_seconds) }}
             title="Play from this tag"
@@ -895,7 +900,7 @@ function ManualTagRow({
               <path d="M6 4l14 8-14 8z" />
             </svg>
           </button>
-          <Links urls={tag.external_urls} />
+          <Links urls={tag.external_urls} title={tag.title} artist={tag.artist} />
           {onDelete && (armed ? (
             <button
               onClick={(e) => { e.stopPropagation(); setArmed(false); void onDelete() }}
@@ -919,7 +924,7 @@ function ManualTagRow({
           ))}
         </div>
 
-        <div className="pl-2 pr-3 py-2.5 flex flex-col items-end justify-center text-[11px] tabular-nums">
+        <div className="pl-2 pr-3 py-2.5 w-48 flex flex-col items-end justify-center text-[11px] tabular-nums">
           <div className="font-mono text-zinc-300">
             {fmtTime(tag.start_seconds)}
             <span className="text-zinc-600">–</span>
@@ -934,26 +939,124 @@ function ManualTagRow({
   )
 }
 
-function Links({ urls }: { urls: Record<string, string> }) {
-  const present = LINK_KINDS.filter((k) => urls[k]) as LinkKind[]
-  if (present.length === 0) return null
+// Platforms we generate fallback search URLs for when the provider didn't
+// give us a direct link. Apple Music + Shazam stay direct-only — nobody
+// discovers via Shazam search and Apple Music's web search is poor.
+const SEARCHABLE: ReadonlySet<LinkKind> = new Set(['spotify', 'youtube', 'soundcloud'])
+
+// Render order WITHIN the search cluster. Deliberately different from the
+// direct order: Shazam almost always returns Spotify direct, so Spotify-as-
+// search is the rare case. Putting it last keeps SoundCloud + YouTube in a
+// consistent column across rows (otherwise Spotify-search elbowing in
+// shifts everything else right).
+const SEARCH_ORDER: readonly LinkKind[] = ['soundcloud', 'youtube', 'spotify']
+
+function buildSearchUrl(kind: LinkKind, query: string): string {
+  const q = encodeURIComponent(query)
+  switch (kind) {
+    case 'spotify':    return `https://open.spotify.com/search/${q}`
+    case 'youtube':    return `https://www.youtube.com/results?search_query=${q}`
+    case 'soundcloud': return `https://soundcloud.com/search?q=${q}`
+    default:           return ''
+  }
+}
+
+interface ResolvedLink { kind: LinkKind; url: string; source: 'direct' | 'search' }
+
+function resolveLinks(
+  urls: Record<string, string>,
+  title: string | null | undefined,
+  artist: string | null | undefined,
+): { direct: ResolvedLink[]; search: ResolvedLink[] } {
+  const direct: ResolvedLink[] = []
+  const query = [title, artist].filter(Boolean).join(' ').trim()
+  // Direct cluster walks the platform priority order.
+  for (const k of LINK_KINDS) {
+    if (urls[k]) direct.push({ kind: k, url: urls[k], source: 'direct' })
+  }
+  // Search cluster uses its own order so columns line up across rows
+  // regardless of which platforms returned direct links.
+  const search: ResolvedLink[] = []
+  if (query) {
+    for (const k of SEARCH_ORDER) {
+      if (!urls[k] && SEARCHABLE.has(k)) {
+        search.push({ kind: k, url: buildSearchUrl(k, query), source: 'search' })
+      }
+    }
+  }
+  return { direct, search }
+}
+
+function Links({
+  urls,
+  title,
+  artist,
+}: {
+  urls: Record<string, string>
+  // Title/artist drive search-URL construction for platforms missing a
+  // direct link. Direct links cluster on the left, search fallbacks on
+  // the right with a divider — at a glance the user knows which links
+  // are confirmed matches vs constructed search queries.
+  title?: string | null
+  artist?: string | null
+}) {
+  const { direct, search } = resolveLinks(urls, title, artist)
+  if (direct.length === 0 && search.length === 0) return null
+  // Fixed-width slots so the divider sits at the same column across rows
+  // (icons would otherwise drift left/right with each row's link count).
+  // Direct slot fits up to 4 icons (the realistic Shazam max is ~3); search
+  // slot fits the 3 SEARCHABLE platforms. Right-align directs and
+  // left-align searches so they meet at the divider.
+  const showDivider = direct.length > 0 && search.length > 0
   return (
-    <>
-      {present.map((k) => (
-        <a
-          key={k}
-          href={urls[k]}
-          target="_blank"
-          rel="noreferrer"
-          aria-label={`Open in ${LINK_LABEL[k]}`}
-          title={LINK_LABEL[k]}
-          onClick={(e) => e.stopPropagation()}
-          className="w-7 h-7 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition"
+    <div className="flex items-center">
+      <div className="flex items-center gap-0.5 justify-end w-28">
+        {direct.map(renderLinkButton)}
+      </div>
+      <span
+        className={
+          'w-px h-4 bg-zinc-700 mx-1.5 self-center ' + (showDivider ? '' : 'invisible')
+        }
+        aria-hidden
+      />
+      <div className="flex items-center gap-0.5 justify-start w-24">
+        {search.map(renderLinkButton)}
+      </div>
+    </div>
+  )
+}
+
+function renderLinkButton(l: ResolvedLink) {
+  const verb = l.source === 'direct' ? 'Open in' : 'Search'
+  return (
+    <a
+      key={l.kind}
+      href={l.url}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`${verb} ${LINK_LABEL[l.kind]}`}
+      title={`${verb} ${LINK_LABEL[l.kind]}`}
+      onClick={(e) => e.stopPropagation()}
+      className={
+        'relative w-7 h-7 inline-flex items-center justify-center rounded-md transition ' +
+        (l.source === 'direct'
+          ? 'text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800'
+          : 'text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 opacity-50 hover:opacity-100')
+      }
+    >
+      <PlatformIcon kind={l.kind} />
+      {l.source === 'search' && (
+        <svg
+          width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+          className="absolute right-0.5 bottom-0.5 text-zinc-200 bg-zinc-900 rounded-full p-px"
+          aria-hidden="true"
         >
-          <PlatformIcon kind={k} />
-        </a>
-      ))}
-    </>
+          <circle cx="11" cy="11" r="8" />
+          <path d="M21 21l-4.35-4.35" />
+        </svg>
+      )}
+    </a>
   )
 }
 

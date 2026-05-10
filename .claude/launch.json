@@ -1,0 +1,22 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "api",
+      "runtimeExecutable": "apps/backend/.venv/bin/uvicorn",
+      "runtimeArgs": ["rekord.api.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000", "--app-dir", "apps/backend/src"],
+      "port": 8000,
+      "env": {
+        "REKORD_DB_PATH": "apps/backend/data/rekord.db",
+        "REKORD_UPLOAD_DIR": "apps/backend/data/uploads",
+        "REKORD_WAVEFORM_CACHE_DIR": "apps/backend/data/waveforms"
+      }
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "apps/web", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}
