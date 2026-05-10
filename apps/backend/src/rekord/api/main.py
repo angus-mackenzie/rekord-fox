@@ -111,7 +111,11 @@ async def upload_media(file: UploadFile) -> MediaOut:
         media = MediaAsset(
             original_filename=file.filename or dest.name,
             content_type=content_type,
-            storage_path=str(dest),
+            # Resolve to an absolute path so the row stays valid no matter
+            # which working directory uvicorn runs from later. Storing the
+            # raw `dest` (relative to settings.upload_dir at upload time)
+            # made existing rows 410 once the cwd changed.
+            storage_path=str(dest.resolve()),
             checksum=checksum,
             duration_seconds=duration,
         )
