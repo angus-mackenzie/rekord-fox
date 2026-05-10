@@ -71,12 +71,35 @@ def _extract_album(track: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalize_spotify(uri: str) -> str | None:
+    """Convert Shazam's `spotify:...` URI to a clickable web URL.
+
+    Shazam returns native scheme URIs (`spotify:track:abc`,
+    `spotify:search:Foo%20Bar`) that the desktop apps understand but
+    browsers cannot open as `<a href>`. Map them onto open.spotify.com so
+    every URL we persist is a real navigable link. Anything that's
+    already an http(s) URL passes through unchanged; anything we don't
+    recognise is dropped (returning None) so junk doesn't reach the UI.
+    """
+    if uri.startswith(("http://", "https://")):
+        return uri
+    if uri.startswith("spotify:"):
+        rest = uri[len("spotify:"):]
+        # `track:abc`, `album:abc`, `playlist:abc`, `search:Foo` → /track/abc, /search/Foo, ...
+        kind, _, ident = rest.partition(":")
+        if kind and ident:
+            return f"https://open.spotify.com/{kind}/{ident}"
+    return None
+
+
 def _extract_external_urls(track: dict[str, Any]) -> dict[str, str]:
     urls: dict[str, str] = {}
     hub = track.get("hub") or {}
     for action in hub.get("actions", []) or []:
         if action.get("type") == "applemusicplay" and action.get("uri"):
-            urls.setdefault("apple_music", action["uri"])
+            uri = action["uri"]
+            if uri.startswith(("http://", "https://")):
+                urls.setdefault("apple_music", uri)
     for provider in hub.get("providers", []) or []:
         ptype = (provider.get("type") or "").lower()
         for action in provider.get("actions", []) or []:
@@ -84,7 +107,9 @@ def _extract_external_urls(track: dict[str, Any]) -> dict[str, str]:
             if not uri:
                 continue
             if "spotify" in ptype or "spotify" in uri:
-                urls.setdefault("spotify", uri)
+                normalized = _normalize_spotify(uri)
+                if normalized:
+                    urls.setdefault("spotify", normalized)
     if track.get("url"):
         urls.setdefault("shazam", track["url"])
     if track.get("share", {}).get("href"):
