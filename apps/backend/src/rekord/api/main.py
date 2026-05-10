@@ -487,6 +487,74 @@ async def get_timeline(job_id: str) -> TimelineOut:
         )
 
 
+@app.get("/jobs/{job_id}/tracklist.{ext}")
+async def export_tracklist(job_id: str, ext: str) -> Response:
+    """Download the tracklist as a TXT, CSV, or XLSX file.
+
+    Output format is taken from the URL extension so browsers use it as
+    the suggested filename and the Save-As dialog picks the right type.
+    """
+    from .export import BUILDERS
+
+    if ext not in BUILDERS:
+        raise HTTPException(400, f"unsupported format {ext!r}; use txt, csv, or xlsx")
+
+    with session_scope() as s:
+        job = s.get(AnalysisJob, job_id)
+        if job is None:
+            raise HTTPException(404, "job not found")
+        media = s.get(MediaAsset, job.media_asset_id)
+        if media is None:
+            raise HTTPException(500, "media missing for job")
+        seg_rows = s.exec(
+            select(TimelineSegment)
+            .where(TimelineSegment.analysis_job_id == job_id)
+            .order_by(TimelineSegment.start_seconds, TimelineSegment.id)
+        ).all()
+        tag_rows = s.exec(
+            select(ManualCorrection)
+            .where(ManualCorrection.analysis_job_id == job_id)
+            .order_by(ManualCorrection.start_seconds, ManualCorrection.id)
+        ).all()
+        media_filename = media.original_filename
+        duration = float(media.duration_seconds or 0.0)
+        # Detach SQLModel objects into plain dicts so the builder functions
+        # don't need a live DB session and can be unit-tested in isolation.
+        segments = [
+            {
+                "start_seconds": r.start_seconds,
+                "end_seconds": r.end_seconds,
+                "title": r.title,
+                "artist": r.artist,
+                "state": r.state,
+                "confidence": r.confidence,
+                "candidates": r.candidates,
+                "notes": r.notes,
+            }
+            for r in seg_rows
+        ]
+        manual_tags = [
+            {
+                "start_seconds": r.start_seconds,
+                "end_seconds": r.end_seconds,
+                "title": r.title,
+                "artist": r.artist,
+                "external_urls": r.external_urls,
+                "notes": r.notes,
+            }
+            for r in tag_rows
+        ]
+
+    data, content_type, filename = BUILDERS[ext](
+        media_filename, duration, segments, manual_tags
+    )
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/jobs/{job_id}/manual-tags", response_model=ManualTagOut, status_code=201)
 async def create_manual_tag(job_id: str, payload: ManualTagCreate) -> ManualTagOut:
     if payload.end_seconds <= payload.start_seconds:

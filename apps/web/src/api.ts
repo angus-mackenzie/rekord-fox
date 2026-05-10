@@ -93,6 +93,14 @@ export function audioUrl(mediaId: string): string {
   return `${BASE}/media/${mediaId}/audio`
 }
 
+// Download URL for a tracklist export. The backend picks the format from
+// the URL extension and returns it as an attachment with a sensible
+// filename, so an `<a download>` click is enough to save it.
+export type TracklistFormat = 'txt' | 'csv' | 'xlsx'
+export function tracklistUrl(jobId: string, ext: TracklistFormat): string {
+  return `${BASE}/jobs/${jobId}/tracklist.${ext}`
+}
+
 export async function createManualTag(jobId: string, input: ManualTagInput): Promise<ManualTag> {
   return request<ManualTag>(`/jobs/${jobId}/manual-tags`, {
     method: 'POST',

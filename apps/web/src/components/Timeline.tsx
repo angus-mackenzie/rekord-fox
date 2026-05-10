@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { audioUrl, getWaveform } from '../api'
+import { audioUrl, getWaveform, tracklistUrl } from '../api'
+import type { TracklistFormat } from '../api'
 import { useAudioPlayer } from '../hooks/useAudioPlayer'
 import type { ManualTag, ManualTagInput, SegmentOut, SegmentState, TimelineOut, WaveformOut } from '../types'
 import { TagModal } from './TagModal'
@@ -122,20 +123,23 @@ export function Timeline({
             <span className="text-violet-300 ml-1">· {manual_tags.length} tagged</span>
           )}
         </span>
-        {onRebuild && timeline.candidate_count > 0 && (
-          <button
-            onClick={onRebuild}
-            disabled={rebuilding}
-            title="Re-fuse segments from existing matches using the latest algorithm. No re-analysis."
-            className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M21 12a9 9 0 11-3-6.7L21 8" /><path d="M21 3v5h-5" />
-            </svg>
-            {rebuilding ? 'Rebuilding…' : 'Rebuild'}
-          </button>
-        )}
+        <div className="ml-auto shrink-0 flex items-center gap-2">
+          <DownloadMenu jobId={timeline.job.id} />
+          {onRebuild && timeline.candidate_count > 0 && (
+            <button
+              onClick={onRebuild}
+              disabled={rebuilding}
+              title="Re-fuse segments from existing matches using the latest algorithm. No re-analysis."
+              className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 11-3-6.7L21 8" /><path d="M21 3v5h-5" />
+              </svg>
+              {rebuilding ? 'Rebuilding…' : 'Rebuild'}
+            </button>
+          )}
+        </div>
       </div>
       {duration > 0 && (
         <WaveformBar
@@ -434,6 +438,88 @@ function UnresolvedJumpIcon({ direction }: { direction: 'back' | 'forward' }) {
       <path d="M5 4l11 8-11 8z" />
       <rect x="17" y="4" width="2.5" height="16" rx="0.5" />
     </svg>
+  )
+}
+
+interface DownloadOption {
+  ext: TracklistFormat
+  label: string
+  hint: string
+}
+
+const DOWNLOAD_OPTIONS: DownloadOption[] = [
+  { ext: 'txt', label: 'Text (.txt)', hint: 'Tracklist with one song per row' },
+  { ext: 'csv', label: 'CSV (.csv)', hint: 'All columns, every region' },
+  { ext: 'xlsx', label: 'Spreadsheet (.xlsx)', hint: 'Same as CSV, formatted' },
+]
+
+/**
+ * Download icon that opens a popover with the three export formats.
+ *
+ * Single-click on the icon = quick TXT download (the user's stated default).
+ * Click the chevron OR open the popover to pick CSV / XLSX. This keeps the
+ * common case one click while leaving room for the alternates without
+ * adding a permanent dropdown to the header.
+ */
+function DownloadMenu({ jobId }: { jobId: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative">
+      <div className="inline-flex rounded border border-zinc-700 hover:border-zinc-500 transition divide-x divide-zinc-700">
+        <a
+          href={tracklistUrl(jobId, 'txt')}
+          download
+          title="Download tracklist (TXT)"
+          aria-label="Download tracklist as text"
+          className="px-2.5 py-1 inline-flex items-center gap-1.5 text-xs text-zinc-300 hover:bg-zinc-800/60 rounded-l"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+            <path d="M7 10l5 5 5-5" /><path d="M12 15V3" />
+          </svg>
+          Download
+        </a>
+        <button
+          onClick={() => setOpen(o => !o)}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="Choose download format"
+          title="Other formats"
+          className="px-1.5 py-1 inline-flex items-center text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 rounded-r"
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+      {open && (
+        <>
+          {/* Click-outside catcher. */}
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <ul
+            role="menu"
+            className="absolute right-0 top-full mt-1 z-20 w-60 rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl py-1"
+          >
+            {DOWNLOAD_OPTIONS.map(opt => (
+              <li key={opt.ext} role="none">
+                <a
+                  role="menuitem"
+                  href={tracklistUrl(jobId, opt.ext)}
+                  download
+                  onClick={() => setOpen(false)}
+                  className="block px-3 py-2 hover:bg-zinc-800/60"
+                >
+                  <div className="text-sm text-zinc-100">{opt.label}</div>
+                  <div className="text-[11px] text-zinc-500">{opt.hint}</div>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
   )
 }
 
