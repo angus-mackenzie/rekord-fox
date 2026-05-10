@@ -16,6 +16,19 @@ export function useAudioPlayer(src: string | null) {
   const [duration, setDuration] = useState<number | null>(null)
   const rafRef = useRef<number | null>(null)
 
+  // Reset playback state on src change using React's "adjust state during
+  // render" pattern (https://react.dev/learn/you-might-not-need-an-effect).
+  // Doing this in the effect would lint as a synchronous setState-in-effect
+  // and incurs an extra render frame; doing it during render is detected by
+  // React and folded into the same render cycle.
+  const [prevSrc, setPrevSrc] = useState(src)
+  if (src !== prevSrc) {
+    setPrevSrc(src)
+    setCurrentTime(0)
+    setIsPlaying(false)
+    setDuration(null)
+  }
+
   // Mount/teardown the audio element when src changes.
   useEffect(() => {
     if (!src) {
@@ -25,9 +38,6 @@ export function useAudioPlayer(src: string | null) {
     const audio = new Audio(src)
     audio.preload = 'metadata'
     audioRef.current = audio
-    setCurrentTime(0)
-    setIsPlaying(false)
-    setDuration(null)
 
     const onPlay = () => setIsPlaying(true)
     const onPause = () => setIsPlaying(false)

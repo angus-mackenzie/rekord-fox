@@ -474,11 +474,16 @@ function WaveformBar({
   const [waveform, setWaveform] = useState<WaveformOut | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const [containerW, setContainerW] = useState(0)
   const [hoverX, setHoverX] = useState<number | null>(null)
   // Live drag state — independent of the committed `pendingSelection` so the
   // band updates fluidly during the drag without round-tripping through the
-  // parent on every mouse-move.
-  const dragRef = useRef<{ startTime: number } | null>(null)
+  // parent on every mouse-move. `dragStartRef` only stores the anchor time
+  // (read in event handlers, never in render); `isDragging` is the render-
+  // visible flag — promoted to state so React knows when to re-render the
+  // cursor / tooltip suppression.
+  const dragStartRef = useRef<number | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
   const [liveSelection, setLiveSelection] = useState<{ start: number; end: number } | null>(null)
   const hoveredSeg = hoveredId ? segments.find((s) => s.id === hoveredId) ?? null : null
   const hoveredTag = hoveredId ? manualTags.find((t) => t.id === hoveredId) ?? null : null
@@ -489,6 +494,18 @@ function WaveformBar({
     getWaveform(mediaId, 800).then((w) => { if (alive) setWaveform(w) }).catch(() => {})
     return () => { alive = false }
   }, [mediaId])
+
+  // Track the container's width as state so render reads don't poke the
+  // ref directly (which can return stale values between renders).
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = () => setContainerW(el.clientWidth)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -523,7 +540,8 @@ function WaveformBar({
     // Start a drag — but don't commit a selection yet. If the user just
     // releases without moving, this becomes a click-to-seek (handled in
     // mouseUp below).
-    dragRef.current = { startTime: pt.t }
+    dragStartRef.current = pt.t
+    setIsDragging(true)
     setLiveSelection(null)
     onSelectionChange(null)
   }
@@ -533,8 +551,8 @@ function WaveformBar({
     if (!pt) return
     setHoverX(pt.x)
 
-    if (dragRef.current) {
-      const { startTime } = dragRef.current
+    if (dragStartRef.current != null) {
+      const startTime = dragStartRef.current
       const start = Math.min(startTime, pt.t)
       const end = Math.max(startTime, pt.t)
       // Only treat it as a real selection once the user has moved a meaningful
@@ -550,9 +568,10 @@ function WaveformBar({
   }
 
   function onMouseUp(e: React.MouseEvent) {
-    const wasDragging = dragRef.current !== null
+    const wasDragging = dragStartRef.current != null
     const moved = liveSelection !== null
-    dragRef.current = null
+    dragStartRef.current = null
+    setIsDragging(false)
     if (!wasDragging) return
     if (moved && liveSelection) {
       onSelectionChange(liveSelection)
@@ -567,14 +586,14 @@ function WaveformBar({
   function onMouseLeave() {
     setHoverX(null)
     onHoverChange(null)
-    if (dragRef.current && liveSelection) {
+    if (dragStartRef.current != null && liveSelection) {
       onSelectionChange(liveSelection)
       setLiveSelection(null)
     }
-    dragRef.current = null
+    dragStartRef.current = null
+    setIsDragging(false)
   }
 
-  const containerW = containerRef.current?.clientWidth ?? 0
   const tooltipText = hoverX != null ? fmtTime((hoverX / Math.max(1, containerW)) * duration) : null
   const hoveredHighlight = hoveredSeg
     ? { start: hoveredSeg.start_seconds, end: hoveredSeg.end_seconds }
@@ -590,7 +609,7 @@ function WaveformBar({
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseLeave}
-      style={{ cursor: dragRef.current ? 'ew-resize' : 'crosshair' }}
+      style={{ cursor: isDragging ? 'ew-resize' : 'crosshair' }}
     >
       <canvas ref={canvasRef} className="block w-full" style={{ height: 96 }} />
       {!waveform && (
@@ -663,7 +682,7 @@ function WaveformBar({
 
       {/* Hover cursor + time tooltip. Suppressed during drag — the selection
           band already shows the range. */}
-      {hoverX != null && waveform && !dragRef.current && (
+      {hoverX != null && waveform && !isDragging && (
         <>
           <div
             className="absolute top-0 bottom-0 w-px bg-zinc-200/50 pointer-events-none"

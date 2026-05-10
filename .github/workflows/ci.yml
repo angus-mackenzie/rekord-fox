@@ -6,6 +6,13 @@ on:
     branches:
       - main
 
+# Force every JavaScript-based action (checkout, setup-python, setup-node, …)
+# to run on the Node 24 runtime instead of the deprecated Node 20 runtime.
+# Node 20 is removed from runners on 2026-09-16; opting in now silences the
+# deprecation warning that was firing on every run.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -48,6 +55,9 @@ jobs:
 
       - name: Install web
         run: npm --prefix apps/web ci
+
+      - name: Lint
+        run: npm --prefix apps/web run lint
 
       - name: Build (also runs `tsc -b` for type-check)
         run: npm --prefix apps/web run build

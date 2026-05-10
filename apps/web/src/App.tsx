@@ -33,7 +33,11 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    refreshRecent()
+    // One-shot synchronisation with the API on mount — exactly the
+    // "subscribe to an external system" use case useEffect is designed for.
+    // Lint rule flags any setState reachable from an effect; suppressing.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshRecent()
     return () => { if (pollRef.current) window.clearInterval(pollRef.current) }
   }, [refreshRecent])
 
