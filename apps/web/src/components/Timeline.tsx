@@ -79,6 +79,30 @@ export function Timeline({
   // Audio playback shared by header button + waveform cursor + click-to-seek.
   const audio = useAudioPlayer(audioUrl(media.id))
 
+  // Measure the segment-list column so the fixed-position PlayerBar can
+  // mirror its width and horizontal offset (the rows live in a grid column
+  // that's narrower than the page max-width because of the Recent sidebar).
+  const contentRef = useRef<HTMLDivElement>(null)
+  const [barRect, setBarRect] = useState<{ left: number; width: number } | null>(null)
+  useEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+    const update = () => {
+      const r = el.getBoundingClientRect()
+      setBarRect({ left: r.left, width: r.width })
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    // Position can also shift on window scroll-induced layout changes
+    // (e.g. mobile URL bar resize) and on viewport resize.
+    window.addEventListener('resize', update)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', update)
+    }
+  }, [])
+
   async function handleSave(input: ManualTagInput) {
     if (!onCreateTag) return
     await onCreateTag(input)
@@ -87,7 +111,10 @@ export function Timeline({
   }
 
   return (
-    <div className="mt-6">
+    // pb-28 leaves clearance for the fixed PlayerBar so the last row in the
+    // segment list can scroll fully into view above it. The ref drives the
+    // bar's width / horizontal offset so it tracks the content column.
+    <div ref={contentRef} className="mt-6 pb-28">
       <div className="flex items-center gap-3 text-sm text-zinc-400 mb-2">
         <span className="truncate">
           {media.original_filename} · {fmtTime(duration)} · {segments.length} segments
@@ -95,32 +122,12 @@ export function Timeline({
             <span className="text-violet-300 ml-1">· {manual_tags.length} tagged</span>
           )}
         </span>
-        <button
-          onClick={audio.togglePlay}
-          title={audio.isPlaying ? 'Pause' : 'Play'}
-          aria-label={audio.isPlaying ? 'Pause' : 'Play'}
-          className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-200"
-        >
-          {audio.isPlaying ? (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <rect x="6" y="4" width="4" height="16" rx="1" />
-              <rect x="14" y="4" width="4" height="16" rx="1" />
-            </svg>
-          ) : (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M6 4l14 8-14 8z" />
-            </svg>
-          )}
-          <span className="font-mono tabular-nums">
-            {fmtTime(audio.currentTime)} / {fmtTime(duration)}
-          </span>
-        </button>
         {onRebuild && timeline.candidate_count > 0 && (
           <button
             onClick={onRebuild}
             disabled={rebuilding}
             title="Re-fuse segments from existing matches using the latest algorithm. No re-analysis."
-            className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
+            className="ml-auto shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/60 text-xs text-zinc-300 disabled:opacity-50"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -186,7 +193,247 @@ export function Timeline({
           onSave={handleSave}
         />
       )}
+
+      {duration > 0 && barRect && (
+        <PlayerBar
+          isPlaying={audio.isPlaying}
+          currentTime={audio.currentTime}
+          duration={duration}
+          segments={segments}
+          manualTags={manual_tags}
+          onTogglePlay={audio.togglePlay}
+          onSeek={audio.seek}
+          rect={barRect}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * Floating playback control tray. Fixed-position so it stays visible while
+ * the segment list scrolls. Timeline applies pb-28 to the page-flow content
+ * so the last segment can scroll above this.
+ *
+ * Transport: ±10s skip, prev/next unresolved (jump to the start of the
+ * nearest unresolved segment), play/pause, current/total time.
+ */
+function PlayerBar({
+  isPlaying,
+  currentTime,
+  duration,
+  segments,
+  manualTags,
+  onTogglePlay,
+  onSeek,
+  rect,
+}: {
+  isPlaying: boolean
+  currentTime: number
+  duration: number
+  segments: SegmentOut[]
+  manualTags: ManualTag[]
+  onTogglePlay: () => void
+  onSeek: (seconds: number) => void
+  // Live measurements of the segment-list column — the bar mirrors these so
+  // it lines up with the rows above it on any viewport / sidebar layout.
+  rect: { left: number; width: number }
+}) {
+  const unresolved = segments
+    .filter((s) => s.state === 'unresolved')
+    .sort((a, b) => a.start_seconds - b.start_seconds)
+
+  function jumpPrevUnresolved() {
+    // Small backoff so repeated clicks step backwards instead of landing on
+    // the same segment when the cursor is *inside* an unresolved region.
+    const cutoff = currentTime - 0.5
+    let target: SegmentOut | undefined
+    for (const s of unresolved) {
+      if (s.start_seconds < cutoff) target = s
+      else break
+    }
+    if (target) onSeek(target.start_seconds)
+  }
+
+  function jumpNextUnresolved() {
+    const cutoff = currentTime + 0.5
+    const target = unresolved.find((s) => s.start_seconds > cutoff)
+    if (target) onSeek(target.start_seconds)
+  }
+
+  const hasUnresolved = unresolved.length > 0
+
+  // "Now playing" label — manual tags win over auto segments since they
+  // represent the user's explicit assertion, then fall back to the segment,
+  // then to the file itself.
+  const activeTag = manualTags.find(
+    (t) => currentTime >= t.start_seconds && currentTime < t.end_seconds,
+  )
+  const activeSeg = segments.find(
+    (s) => currentTime >= s.start_seconds && currentTime < s.end_seconds,
+  )
+  const nowTitle = activeTag?.title ?? activeSeg?.title ?? null
+  const nowSubtitle = activeTag?.artist ?? activeSeg?.artist ?? null
+  const nowAccent = activeTag ? 'bg-violet-300' :
+    activeSeg ? STATE_STYLE[activeSeg.state].dot : 'bg-zinc-600'
+
+  return (
+    // Anchored to the segment-list column's measured rect (left + width)
+    // so the bar visually matches the rows above it regardless of layout
+    // (sidebar present/absent, viewport width, etc.). Outer is
+    // pointer-events-none so empty space around the pill stays click-through.
+    <div
+      className="fixed bottom-4 z-40 pointer-events-none"
+      style={{ left: rect.left, width: rect.width }}
+      role="region"
+      aria-label="Playback controls"
+    >
+      <div className="pointer-events-auto">
+        <div className="flex items-center gap-3 px-4 py-2 rounded-full bg-zinc-900/95 backdrop-blur border border-zinc-700 shadow-2xl">
+          {/* Left: now-playing — what's under the playback cursor right now. */}
+          <div className="flex items-center gap-2.5 flex-1 min-w-0">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${nowAccent}`} aria-hidden />
+            <div className="min-w-0 flex-1">
+              {nowTitle ? (
+                <>
+                  <div className="truncate text-[12.5px] leading-tight text-zinc-100">
+                    {nowTitle}
+                  </div>
+                  {nowSubtitle && (
+                    <div className="truncate text-[10.5px] leading-tight text-zinc-500 mt-px">
+                      {nowSubtitle}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="truncate text-[11.5px] text-zinc-500 italic">
+                  {currentTime === 0 ? 'press play' : 'unidentified region'}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Center: transport. shrink-0 so the now-playing label is what
+              compresses on narrow viewports, not the controls. */}
+          <div className="shrink-0 flex items-center gap-0.5">
+            <PlayerBarButton
+              onClick={jumpPrevUnresolved}
+              disabled={!hasUnresolved}
+              title="Previous unresolved segment"
+              aria-label="Previous unresolved"
+            >
+              <UnresolvedJumpIcon direction="back" />
+            </PlayerBarButton>
+            <PlayerBarButton
+              onClick={() => onSeek(Math.max(0, currentTime - 10))}
+              title="Back 10 seconds"
+              aria-label="Back 10 seconds"
+            >
+              <SkipIcon direction="back" />
+            </PlayerBarButton>
+            <button
+              onClick={onTogglePlay}
+              title={isPlaying ? 'Pause' : 'Play'}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+              className="w-10 h-10 inline-flex items-center justify-center rounded-full bg-zinc-100 hover:bg-white text-zinc-900 transition mx-1"
+            >
+              {isPlaying ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <rect x="6" y="4" width="4" height="16" rx="1" />
+                  <rect x="14" y="4" width="4" height="16" rx="1" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M6 4l14 8-14 8z" />
+                </svg>
+              )}
+            </button>
+            <PlayerBarButton
+              onClick={() => onSeek(Math.min(duration, currentTime + 10))}
+              title="Forward 10 seconds"
+              aria-label="Forward 10 seconds"
+            >
+              <SkipIcon direction="forward" />
+            </PlayerBarButton>
+            <PlayerBarButton
+              onClick={jumpNextUnresolved}
+              disabled={!hasUnresolved}
+              title="Next unresolved segment"
+              aria-label="Next unresolved"
+            >
+              <UnresolvedJumpIcon direction="forward" />
+            </PlayerBarButton>
+          </div>
+
+          {/* Right: time. Hidden on narrow widths to keep the controls primary. */}
+          <div className="shrink-0 hidden sm:block w-32 text-right font-mono text-[11px] text-zinc-300 tabular-nums">
+            {fmtTime(currentTime)}
+            <span className="text-zinc-600 mx-1">/</span>
+            {fmtTime(duration)}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PlayerBarButton({
+  children, onClick, disabled, title, ...rest
+}: {
+  children: React.ReactNode
+  onClick: () => void
+  disabled?: boolean
+  title: string
+  'aria-label': string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      {...rest}
+      className="w-9 h-9 inline-flex items-center justify-center rounded-full text-zinc-300 hover:text-white hover:bg-zinc-800 transition disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-300"
+    >
+      {children}
+    </button>
+  )
+}
+
+function SkipIcon({ direction }: { direction: 'back' | 'forward' }) {
+  // ±10s rewind/fast-forward — double chevron, the universal jog glyph.
+  // Different path per direction (no SVG transform hackery).
+  if (direction === 'back') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M11 5L4 12l7 7zM20 5l-7 7 7 7z" />
+      </svg>
+    )
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M13 5l7 7-7 7zM4 5l7 7-7 7z" />
+    </svg>
+  )
+}
+
+function UnresolvedJumpIcon({ direction }: { direction: 'back' | 'forward' }) {
+  // Skip-to-track-edge glyph, amber-tinted so the colour echoes the
+  // unresolved-state styling in the waveform / segment list.
+  if (direction === 'back') {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+           className="text-amber-400">
+        <path d="M19 4L8 12l11 8z" />
+        <rect x="4.5" y="4" width="2.5" height="16" rx="0.5" />
+      </svg>
+    )
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"
+         className="text-amber-400">
+      <path d="M5 4l11 8-11 8z" />
+      <rect x="17" y="4" width="2.5" height="16" rx="0.5" />
+    </svg>
   )
 }
 
