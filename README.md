@@ -133,6 +133,9 @@ Important UI surfaces:
 
 ## Future Ideas
 
+- macOS desktop app — an untested Electron + PyInstaller wrapper lives on the
+  `feature/macos-desktop` branch (along with work-in-progress editable
+  timeline segments). Not merged until it's been tested end to end.
 - Panako or other robust local fingerprint providers
 - local fingerprint corpus for private music libraries
 - Spotify playlist generation
