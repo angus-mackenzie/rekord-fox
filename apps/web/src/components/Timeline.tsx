@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { audioUrl, getWaveform, tracklistUrl } from '../api'
 import type { TracklistFormat } from '../api'
 import { useAudioPlayer } from '../hooks/useAudioPlayer'
-import type { ManualTag, ManualTagInput, SegmentOut, SegmentState, TimelineOut, WaveformOut } from '../types'
+import type {
+  ManualTag, ManualTagInput, SegmentCandidate, SegmentOut, SegmentState, TimelineOut, WaveformOut,
+} from '../types'
 import { TagModal } from './TagModal'
 
 // Manual user-authored tags get a distinct accent so they're never confused
@@ -24,6 +26,8 @@ const STATE_FILL: Record<SegmentState, string> = {
   unresolved: 'rgba(82, 82, 91, 0.55)',    // zinc-600 (dim — unresolved is absence)
 }
 const PENDING_FILL = 'rgba(82, 82, 91, 0.55)'
+const MIN_SEGMENT_SECONDS = 0.5
+const MAX_EDIT_HISTORY = 20
 
 // Brand-color icon glyphs for external links. Order = display priority
 // (Spotify first per docs/INVARIANTS.md), so the most-useful link is leftmost.
@@ -69,6 +73,10 @@ export function Timeline({
 }) {
   const { segments, media, manual_tags } = timeline
   const duration = media.duration_seconds ?? 0
+  const [editedSegments, setEditedSegments] = useState<SegmentOut[]>(segments)
+  const [undoStack, setUndoStack] = useState<TimelineEditEntry[]>([])
+  const [redoStack, setRedoStack] = useState<TimelineEditEntry[]>([])
+  const [editingSegment, setEditingSegment] = useState<SegmentOut | null>(null)
 
   // Hover state for bidirectional waveform↔row highlight.
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -79,6 +87,18 @@ export function Timeline({
 
   // Audio playback shared by header button + waveform cursor + click-to-seek.
   const audio = useAudioPlayer(audioUrl(media.id))
+
+  useEffect(() => {
+    // Reset the session edit layer whenever a different backend timeline is
+    // loaded. This mirrors App's API synchronisation effects.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEditedSegments(segments)
+    setUndoStack([])
+    setRedoStack([])
+    setPendingSelection(null)
+    setModalOpen(false)
+    setEditingSegment(null)
+  }, [timeline.job.id, segments])
 
   // Measure the segment-list column so the fixed-position PlayerBar can
   // mirror its width and horizontal offset (the rows live in a grid column
@@ -111,6 +131,77 @@ export function Timeline({
     setModalOpen(false)
   }
 
+  function commitSegments(label: string, nextSegments: SegmentOut[]) {
+    const next = normalizeEditedSegments(nextSegments, duration)
+    if (segmentsEqual(editedSegments, next)) return
+    setUndoStack((stack) => [
+      ...stack.slice(Math.max(0, stack.length - (MAX_EDIT_HISTORY - 1))),
+      { label, segments: cloneSegments(editedSegments) },
+    ])
+    setRedoStack([])
+    setEditedSegments(next)
+  }
+
+  function undoEdit() {
+    const prev = undoStack.at(-1)
+    if (!prev) return
+    setRedoStack((stack) => [
+      { label: prev.label, segments: cloneSegments(editedSegments) },
+      ...stack.slice(0, MAX_EDIT_HISTORY - 1),
+    ])
+    setEditedSegments(cloneSegments(prev.segments))
+    setUndoStack((stack) => stack.slice(0, -1))
+  }
+
+  function redoEdit() {
+    const next = redoStack[0]
+    if (!next) return
+    setUndoStack((stack) => [
+      ...stack.slice(Math.max(0, stack.length - (MAX_EDIT_HISTORY - 1))),
+      { label: next.label, segments: cloneSegments(editedSegments) },
+    ])
+    setEditedSegments(cloneSegments(next.segments))
+    setRedoStack((stack) => stack.slice(1))
+  }
+
+  function handleSegmentRangeChange(segmentId: string, start: number, end: number) {
+    const seg = editedSegments.find((s) => s.id === segmentId)
+    if (!seg) return
+    commitSegments(
+      `Adjusted ${seg.title ?? seg.notes ?? 'segment'} to ${fmtTime(start)}-${fmtTime(end)}`,
+      applySegmentRange(editedSegments, segmentId, start, end, duration),
+    )
+  }
+
+  function handleSegmentSave(next: SegmentOut) {
+    commitSegments(
+      `Edited ${next.title ?? next.notes ?? 'segment'}`,
+      replaceSegment(editedSegments, next, duration),
+    )
+    setEditingSegment(null)
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || isFormElement(e.target)) return
+      const key = e.key.toLowerCase()
+      if (key === 'z' && e.shiftKey) {
+        e.preventDefault()
+        redoEdit()
+      } else if (key === 'z') {
+        e.preventDefault()
+        undoEdit()
+      } else if (key === 'y') {
+        e.preventDefault()
+        redoEdit()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // undoEdit/redoEdit intentionally read the current stacks from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editedSegments, undoStack, redoStack])
+
   return (
     // pb-28 leaves clearance for the fixed PlayerBar so the last row in the
     // segment list can scroll fully into view above it. The ref drives the
@@ -118,7 +209,7 @@ export function Timeline({
     <div ref={contentRef} className="mt-6 pb-28">
       <div className="flex items-center gap-3 text-sm text-zinc-400 mb-2">
         <span className="truncate">
-          {media.original_filename} · {fmtTime(duration)} · {segments.length} segments
+          {media.original_filename} · {fmtTime(duration)} · {editedSegments.length} segments
           {manual_tags.length > 0 && (
             <span className="text-violet-300 ml-1">· {manual_tags.length} tagged</span>
           )}
@@ -145,7 +236,7 @@ export function Timeline({
         <WaveformBar
           mediaId={media.id}
           duration={duration}
-          segments={segments}
+          segments={editedSegments}
           manualTags={manual_tags}
           hoveredId={hoveredId}
           onHoverChange={setHoveredId}
@@ -155,14 +246,22 @@ export function Timeline({
           onSelectionChange={setPendingSelection}
           onTagClick={() => setModalOpen(true)}
           taggingEnabled={!!onCreateTag}
+          onSegmentRangeChange={handleSegmentRangeChange}
         />
       )}
 
-      {(segments.length > 0 || manual_tags.length > 0) && (
+      <EditHistoryBar
+        undoStack={undoStack}
+        redoStack={redoStack}
+        onUndo={undoEdit}
+        onRedo={redoEdit}
+      />
+
+      {(editedSegments.length > 0 || manual_tags.length > 0) && (
         <ul className="mt-4 rounded-lg border border-zinc-800/70 divide-y divide-zinc-800/70 overflow-hidden">
           {[
             ...manual_tags.map((t) => ({ kind: 'manual' as const, t })),
-            ...segments.map((s) => ({ kind: 'segment' as const, s })),
+            ...editedSegments.map((s) => ({ kind: 'segment' as const, s })),
           ]
             .sort((a, b) => {
               const aStart = a.kind === 'manual' ? a.t.start_seconds : a.s.start_seconds
@@ -184,6 +283,7 @@ export function Timeline({
                 seg={row.s}
                 highlighted={row.s.id === hoveredId}
                 onHoverChange={setHoveredId}
+                onEdit={() => setEditingSegment(row.s)}
               />
             ))}
         </ul>
@@ -198,12 +298,21 @@ export function Timeline({
         />
       )}
 
+      {editingSegment && (
+        <SegmentEditModal
+          segment={editingSegment}
+          duration={duration}
+          onCancel={() => setEditingSegment(null)}
+          onSave={handleSegmentSave}
+        />
+      )}
+
       {duration > 0 && barRect && (
         <PlayerBar
           isPlaying={audio.isPlaying}
           currentTime={audio.currentTime}
           duration={duration}
-          segments={segments}
+          segments={editedSegments}
           manualTags={manual_tags}
           onTogglePlay={audio.togglePlay}
           onSeek={audio.seek}
@@ -543,6 +652,7 @@ function WaveformBar({
   onSelectionChange,
   onTagClick,
   taggingEnabled,
+  onSegmentRangeChange,
 }: {
   mediaId: string
   duration: number
@@ -556,6 +666,7 @@ function WaveformBar({
   onSelectionChange: (s: { start: number; end: number } | null) => void
   onTagClick: () => void
   taggingEnabled: boolean
+  onSegmentRangeChange?: (segmentId: string, start: number, end: number) => void
 }) {
   const [waveform, setWaveform] = useState<WaveformOut | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -571,6 +682,9 @@ function WaveformBar({
   const dragStartRef = useRef<number | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [liveSelection, setLiveSelection] = useState<{ start: number; end: number } | null>(null)
+  const [activeResize, setActiveResize] = useState<{ segment: SegmentOut; edge: 'start' | 'end' } | null>(null)
+  const [resizePreview, setResizePreview] = useState<{ id: string; start: number; end: number } | null>(null)
+  const resizePreviewRef = useRef<{ id: string; start: number; end: number } | null>(null)
   const hoveredSeg = hoveredId ? segments.find((s) => s.id === hoveredId) ?? null : null
   const hoveredTag = hoveredId ? manualTags.find((t) => t.id === hoveredId) ?? null : null
   const selection = liveSelection ?? pendingSelection
@@ -619,8 +733,66 @@ function WaveformBar({
     return { x, t }
   }
 
+  function clientXToTime(clientX: number): number | null {
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return null
+    const x = Math.max(0, Math.min(rect.width, clientX - rect.left))
+    return (x / Math.max(1, rect.width)) * duration
+  }
+
+  useEffect(() => {
+    if (!activeResize) return
+    const original = activeResize.segment
+    const onMove = (e: MouseEvent) => {
+      const t = clientXToTime(e.clientX)
+      if (t == null) return
+      const start = activeResize.edge === 'start'
+        ? Math.min(t, original.end_seconds - MIN_SEGMENT_SECONDS)
+        : original.start_seconds
+      const end = activeResize.edge === 'end'
+        ? Math.max(t, original.start_seconds + MIN_SEGMENT_SECONDS)
+        : original.end_seconds
+      const next = {
+        id: original.id,
+        start: Math.max(0, Math.min(duration, start)),
+        end: Math.max(0, Math.min(duration, end)),
+      }
+      resizePreviewRef.current = next
+      setResizePreview(next)
+    }
+    const onUp = () => {
+      const next = resizePreviewRef.current
+      if (next && onSegmentRangeChange) onSegmentRangeChange(next.id, next.start, next.end)
+      resizePreviewRef.current = null
+      setResizePreview(null)
+      setActiveResize(null)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp, { once: true })
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    // clientXToTime reads the current container ref; recreating the listeners
+    // for every render would make drag state noisy without changing behavior.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeResize, duration, onSegmentRangeChange])
+
+  function beginResize(e: React.MouseEvent, segment: SegmentOut, edge: 'start' | 'end') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!onSegmentRangeChange) return
+    const next = { id: segment.id, start: segment.start_seconds, end: segment.end_seconds }
+    resizePreviewRef.current = next
+    setResizePreview(next)
+    setActiveResize({ segment, edge })
+    setLiveSelection(null)
+    onSelectionChange(null)
+  }
+
   function onMouseDown(e: React.MouseEvent) {
     if (e.button !== 0) return
+    if (activeResize) return
     const pt = eventToTime(e)
     if (!pt) return
     // Start a drag — but don't commit a selection yet. If the user just
@@ -636,6 +808,8 @@ function WaveformBar({
     const pt = eventToTime(e)
     if (!pt) return
     setHoverX(pt.x)
+
+    if (activeResize) return
 
     if (dragStartRef.current != null) {
       const startTime = dragStartRef.current
@@ -654,6 +828,7 @@ function WaveformBar({
   }
 
   function onMouseUp(e: React.MouseEvent) {
+    if (activeResize) return
     const wasDragging = dragStartRef.current != null
     const moved = liveSelection !== null
     dragStartRef.current = null
@@ -672,6 +847,7 @@ function WaveformBar({
   function onMouseLeave() {
     setHoverX(null)
     onHoverChange(null)
+    if (activeResize) return
     if (dragStartRef.current != null && liveSelection) {
       onSelectionChange(liveSelection)
       setLiveSelection(null)
@@ -695,7 +871,7 @@ function WaveformBar({
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseLeave}
-      style={{ cursor: isDragging ? 'ew-resize' : 'crosshair' }}
+      style={{ cursor: isDragging || activeResize ? 'ew-resize' : 'crosshair' }}
     >
       <canvas ref={canvasRef} className="block w-full" style={{ height: 96 }} />
       {!waveform && (
@@ -719,6 +895,41 @@ function WaveformBar({
         />
       ))}
 
+      {/* Segment resize handles. Dragging an identified segment over another
+          trims/splits the covered segment in the session edit layer. */}
+      {duration > 0 && onSegmentRangeChange && segments.filter((s) => s.title).map((seg) => {
+        const left = (seg.start_seconds / duration) * 100
+        const width = ((seg.end_seconds - seg.start_seconds) / duration) * 100
+        return (
+          <div
+            key={`resize:${seg.id}`}
+            className="absolute top-0 bottom-0 pointer-events-none"
+            style={{ left: `${left}%`, width: `${width}%` }}
+          >
+            <button
+              type="button"
+              onMouseDown={(e) => beginResize(e, seg, 'start')}
+              onMouseEnter={() => onHoverChange(seg.id)}
+              title={`Move start of ${seg.title}`}
+              aria-label={`Move start of ${seg.title}`}
+              className="absolute left-0 top-0 bottom-0 w-3 -translate-x-1/2 pointer-events-auto cursor-ew-resize opacity-0 hover:opacity-100 focus:opacity-100 transition"
+            >
+              <span className="block h-full w-px mx-auto bg-white shadow-[0_0_8px_rgba(255,255,255,0.8)]" />
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => beginResize(e, seg, 'end')}
+              onMouseEnter={() => onHoverChange(seg.id)}
+              title={`Move end of ${seg.title}`}
+              aria-label={`Move end of ${seg.title}`}
+              className="absolute right-0 top-0 bottom-0 w-3 translate-x-1/2 pointer-events-auto cursor-ew-resize opacity-0 hover:opacity-100 focus:opacity-100 transition"
+            >
+              <span className="block h-full w-px mx-auto bg-white shadow-[0_0_8px_rgba(255,255,255,0.8)]" />
+            </button>
+          </div>
+        )
+      })}
+
       {/* Hover region (segment OR manual tag). */}
       {hoveredHighlight && duration > 0 && (
         <div
@@ -726,6 +937,16 @@ function WaveformBar({
           style={{
             left: `${(hoveredHighlight.start / duration) * 100}%`,
             width: `${((hoveredHighlight.end - hoveredHighlight.start) / duration) * 100}%`,
+          }}
+        />
+      )}
+
+      {resizePreview && duration > 0 && (
+        <div
+          className="absolute top-0 bottom-0 pointer-events-none ring-2 ring-cyan-300 bg-cyan-300/15"
+          style={{
+            left: `${(resizePreview.start / duration) * 100}%`,
+            width: `${((resizePreview.end - resizePreview.start) / duration) * 100}%`,
           }}
         />
       )}
@@ -833,14 +1054,451 @@ function drawSegmentedWaveform(
   }
 }
 
+function roundTenth(value: number): number {
+  return Math.round(value * 10) / 10
+}
+
+function isFormElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  return target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    target.tagName === 'SELECT' ||
+    target.isContentEditable
+}
+
+function cloneSegments(segments: SegmentOut[]): SegmentOut[] {
+  return segments.map((s) => ({
+    ...s,
+    candidates: s.candidates.map((c) => ({
+      ...c,
+      external_urls: { ...(c.external_urls ?? {}) },
+    })),
+  }))
+}
+
+function segmentsEqual(a: SegmentOut[], b: SegmentOut[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+function makeUnresolvedSegment(start: number, end: number): SegmentOut {
+  return {
+    id: `session-unresolved-${start.toFixed(3)}-${end.toFixed(3)}`,
+    start_seconds: start,
+    end_seconds: end,
+    state: 'unresolved',
+    confidence: 0,
+    title: null,
+    artist: null,
+    candidates: [],
+    notes: 'no provider match',
+  }
+}
+
+function normalizeEditedSegments(segments: SegmentOut[], duration: number): SegmentOut[] {
+  const sorted = segments
+    .map((s) => ({
+      ...s,
+      start_seconds: Math.max(0, Math.min(duration, s.start_seconds)),
+      end_seconds: Math.max(0, Math.min(duration, s.end_seconds)),
+    }))
+    .filter((s) => s.end_seconds - s.start_seconds >= MIN_SEGMENT_SECONDS)
+    .sort((a, b) => a.start_seconds - b.start_seconds || a.end_seconds - b.end_seconds)
+
+  const out: SegmentOut[] = []
+  let cursor = 0
+  for (const seg of sorted) {
+    const start = Math.max(seg.start_seconds, cursor)
+    if (start - cursor >= MIN_SEGMENT_SECONDS) {
+      out.push(makeUnresolvedSegment(cursor, start))
+    }
+    if (seg.end_seconds - start >= MIN_SEGMENT_SECONDS) {
+      out.push({ ...seg, start_seconds: start })
+      cursor = seg.end_seconds
+    }
+  }
+  if (duration - cursor >= MIN_SEGMENT_SECONDS) {
+    out.push(makeUnresolvedSegment(cursor, duration))
+  }
+  return mergeAdjacentUnresolved(out)
+}
+
+function mergeAdjacentUnresolved(segments: SegmentOut[]): SegmentOut[] {
+  const out: SegmentOut[] = []
+  for (const seg of segments) {
+    const prev = out.at(-1)
+    if (
+      prev &&
+      prev.state === 'unresolved' &&
+      seg.state === 'unresolved' &&
+      Math.abs(prev.end_seconds - seg.start_seconds) < 0.001
+    ) {
+      out[out.length - 1] = {
+        ...prev,
+        id: `session-unresolved-${prev.start_seconds.toFixed(3)}-${seg.end_seconds.toFixed(3)}`,
+        end_seconds: seg.end_seconds,
+      }
+    } else {
+      out.push(seg)
+    }
+  }
+  return out
+}
+
+function replaceSegment(segments: SegmentOut[], next: SegmentOut, duration: number): SegmentOut[] {
+  return applySegmentRange(
+    segments.map((s) => (s.id === next.id ? next : s)),
+    next.id,
+    next.start_seconds,
+    next.end_seconds,
+    duration,
+  )
+}
+
+function applySegmentRange(
+  segments: SegmentOut[],
+  segmentId: string,
+  start: number,
+  end: number,
+  duration: number,
+): SegmentOut[] {
+  const target = segments.find((s) => s.id === segmentId)
+  if (!target) return segments
+  const nextStart = Math.max(0, Math.min(duration, Math.min(start, end)))
+  const nextEnd = Math.max(0, Math.min(duration, Math.max(start, end)))
+  const updated = { ...target, start_seconds: nextStart, end_seconds: nextEnd }
+  const out: SegmentOut[] = []
+
+  for (const seg of segments) {
+    if (seg.id === segmentId) {
+      out.push(updated)
+      continue
+    }
+    if (seg.end_seconds <= nextStart || seg.start_seconds >= nextEnd) {
+      out.push(seg)
+      continue
+    }
+    if (seg.start_seconds < nextStart) {
+      out.push({
+        ...seg,
+        id: `${seg.id}:before:${nextStart.toFixed(3)}`,
+        end_seconds: nextStart,
+      })
+    }
+    if (seg.end_seconds > nextEnd) {
+      out.push({
+        ...seg,
+        id: `${seg.id}:after:${nextEnd.toFixed(3)}`,
+        start_seconds: nextEnd,
+      })
+    }
+  }
+
+  return normalizeEditedSegments(out, duration)
+}
+
+function EditHistoryBar({
+  undoStack,
+  redoStack,
+  onUndo,
+  onRedo,
+}: {
+  undoStack: TimelineEditEntry[]
+  redoStack: TimelineEditEntry[]
+  onUndo: () => void
+  onRedo: () => void
+}) {
+  if (undoStack.length === 0 && redoStack.length === 0) return null
+  const recent = undoStack.slice(-4).reverse()
+  return (
+    <div className="mt-3 flex items-center gap-2 min-h-8 text-xs text-zinc-500">
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onUndo}
+          disabled={undoStack.length === 0}
+          title="Undo"
+          aria-label="Undo"
+          className="w-7 h-7 rounded-md border border-zinc-800 inline-flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 hover:bg-zinc-900 disabled:opacity-35 disabled:hover:border-zinc-800 disabled:hover:bg-transparent"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9 14L4 9l5-5" /><path d="M4 9h10a6 6 0 010 12h-1" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={onRedo}
+          disabled={redoStack.length === 0}
+          title="Redo"
+          aria-label="Redo"
+          className="w-7 h-7 rounded-md border border-zinc-800 inline-flex items-center justify-center text-zinc-400 hover:text-zinc-100 hover:border-zinc-600 hover:bg-zinc-900 disabled:opacity-35 disabled:hover:border-zinc-800 disabled:hover:bg-transparent"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M15 14l5-5-5-5" /><path d="M20 9H10a6 6 0 000 12h1" />
+          </svg>
+        </button>
+      </div>
+      <span className="uppercase tracking-wider text-zinc-600">Session edits</span>
+      <div className="min-w-0 flex items-center gap-1.5 overflow-hidden">
+        {recent.map((entry, i) => (
+          <span
+            key={`${entry.label}:${i}`}
+            className="max-w-48 truncate px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-400"
+            title={entry.label}
+          >
+            {entry.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SegmentEditModal({
+  segment,
+  duration,
+  onCancel,
+  onSave,
+}: {
+  segment: SegmentOut
+  duration: number
+  onCancel: () => void
+  onSave: (segment: SegmentOut) => void
+}) {
+  const primary = segment.candidates[0]
+  const [start, setStart] = useState(String(roundTenth(segment.start_seconds)))
+  const [end, setEnd] = useState(String(roundTenth(segment.end_seconds)))
+  const [title, setTitle] = useState(segment.title ?? '')
+  const [artist, setArtist] = useState(segment.artist ?? '')
+  const [spotify, setSpotify] = useState(primary?.external_urls?.spotify ?? '')
+  const [shazam, setShazam] = useState(primary?.external_urls?.shazam ?? '')
+  const [youtube, setYoutube] = useState(primary?.external_urls?.youtube ?? '')
+  const [soundcloud, setSoundcloud] = useState(primary?.external_urls?.soundcloud ?? '')
+  const [notes, setNotes] = useState(segment.notes ?? '')
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onCancel])
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    const startSeconds = Number(start)
+    const endSeconds = Number(end)
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+      setError('Use numeric start and end times.')
+      return
+    }
+    if (endSeconds - startSeconds < MIN_SEGMENT_SECONDS) {
+      setError('Segment is too short.')
+      return
+    }
+    if (!title.trim() && !artist.trim()) {
+      setError('Add a title or artist.')
+      return
+    }
+
+    const externalUrls: Record<string, string> = {}
+    if (spotify.trim()) externalUrls.spotify = spotify.trim()
+    if (shazam.trim()) externalUrls.shazam = shazam.trim()
+    if (youtube.trim()) externalUrls.youtube = youtube.trim()
+    if (soundcloud.trim()) externalUrls.soundcloud = soundcloud.trim()
+
+    const manualCandidate: SegmentCandidate = {
+      provider: 'manual',
+      title: title.trim() || 'Unknown title',
+      artist: artist.trim() || 'Unknown artist',
+      confidence: 1,
+      external_urls: externalUrls,
+      album: primary?.album ?? null,
+      artwork_url: primary?.artwork_url ?? null,
+      provider_track_id: primary?.provider_track_id ?? null,
+    }
+    onSave({
+      ...segment,
+      start_seconds: Math.max(0, Math.min(duration, startSeconds)),
+      end_seconds: Math.max(0, Math.min(duration, endSeconds)),
+      state: 'confirmed',
+      confidence: 1,
+      title: title.trim() || null,
+      artist: artist.trim() || null,
+      notes: notes.trim() || null,
+      candidates: [manualCandidate, ...segment.candidates.filter((c) => c.provider !== 'manual')],
+    })
+  }
+
+  const query = [title, artist].filter((v) => v.trim()).join(' ').trim()
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <form
+        onSubmit={handleSubmit}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg mx-4 rounded-xl bg-zinc-900 border border-zinc-700 shadow-2xl p-5 space-y-3"
+      >
+        <div className="flex items-baseline justify-between gap-3">
+          <h2 className="text-base font-semibold text-zinc-100">
+            {segment.title ? 'Edit segment' : 'Name segment'}
+          </h2>
+          <span className="font-mono text-xs text-zinc-400 tabular-nums">
+            {fmtTime(segment.start_seconds)}-{fmtTime(segment.end_seconds)}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Start seconds">
+            <input
+              type="number"
+              min={0}
+              max={duration}
+              step={0.1}
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+              className="w-full px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-violet-500"
+            />
+          </Field>
+          <Field label="End seconds">
+            <input
+              type="number"
+              min={0}
+              max={duration}
+              step={0.1}
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+              className="w-full px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-violet-500"
+            />
+          </Field>
+        </div>
+
+        <Field label="Title">
+          <input
+            autoFocus
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Let It Happen (Soulwax Remix)"
+            className="w-full px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-violet-500"
+          />
+        </Field>
+        <Field label="Artist">
+          <input
+            value={artist}
+            onChange={(e) => setArtist(e.target.value)}
+            placeholder="Tame Impala"
+            className="w-full px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-violet-500"
+          />
+        </Field>
+
+        {query && (
+          <div className="flex items-center gap-2">
+            <a
+              href={buildSearchUrl('spotify', query)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300 hover:text-white hover:border-zinc-500 hover:bg-zinc-800"
+            >
+              <PlatformIcon kind="spotify" /> Search Spotify
+            </a>
+            <a
+              href={buildSearchUrl('shazam', query)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300 hover:text-white hover:border-zinc-500 hover:bg-zinc-800"
+            >
+              <PlatformIcon kind="shazam" /> Search Shazam
+            </a>
+          </div>
+        )}
+
+        <details className="group">
+          <summary className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-200 select-none">
+            Links
+          </summary>
+          <div className="mt-2 space-y-2">
+            <CompactField label="Spotify" value={spotify} onChange={setSpotify} placeholder="https://open.spotify.com/track/..." />
+            <CompactField label="Shazam" value={shazam} onChange={setShazam} placeholder="https://www.shazam.com/track/..." />
+            <CompactField label="YouTube" value={youtube} onChange={setYoutube} placeholder="https://youtu.be/..." />
+            <CompactField label="SoundCloud" value={soundcloud} onChange={setSoundcloud} placeholder="https://soundcloud.com/..." />
+          </div>
+        </details>
+
+        <Field label="Notes">
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            className="w-full px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 focus:outline-none focus:border-violet-500 resize-none"
+          />
+        </Field>
+
+        {error && (
+          <div className="text-xs text-red-300 bg-red-900/40 border border-red-700 rounded px-2 py-1">
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded text-xs text-zinc-300 hover:text-white hover:bg-zinc-800 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="px-4 py-1.5 rounded text-xs font-medium bg-violet-500 hover:bg-violet-400 text-white transition"
+          >
+            Save edit
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="text-[11px] uppercase tracking-wider text-zinc-500 mb-1 block">{label}</span>
+      {children}
+    </label>
+  )
+}
+
+function CompactField({
+  label, value, onChange, placeholder,
+}: {
+  label: string; value: string; onChange: (v: string) => void; placeholder: string
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="w-20 shrink-0 text-[11px] text-zinc-500">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="flex-1 px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-xs text-zinc-100 focus:outline-none focus:border-violet-500"
+      />
+    </label>
+  )
+}
+
 function SegmentRow({
   seg,
   highlighted,
   onHoverChange,
+  onEdit,
 }: {
   seg: SegmentOut
   highlighted: boolean
   onHoverChange: (id: string | null) => void
+  onEdit: () => void
 }) {
   const styles = STATE_STYLE[seg.state]
   const primary = seg.candidates[0]
@@ -904,6 +1562,23 @@ function SegmentRow({
             </div>
           </div>
         )}
+        {!seg.title && <div className="px-2 py-2 flex items-center" />}
+
+        <div className="py-2 flex items-center">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onEdit() }}
+            title={seg.title ? 'Edit segment' : 'Name this segment'}
+            aria-label={seg.title ? 'Edit segment' : 'Name this segment'}
+            className="w-7 h-7 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z" />
+            </svg>
+          </button>
+        </div>
 
         {/* Meta block — fixed width so the duration string ("20s" vs
             "1m 35s") doesn't wobble the actions cluster's right edge. */}
@@ -1045,16 +1720,16 @@ function ManualTagRow({
 }
 
 // Platforms we generate fallback search URLs for when the provider didn't
-// give us a direct link. Apple Music + Shazam stay direct-only — nobody
-// discovers via Shazam search and Apple Music's web search is poor.
-const SEARCHABLE: ReadonlySet<LinkKind> = new Set(['spotify', 'youtube', 'soundcloud'])
+// give us a direct link. Apple Music stays direct-only because its web search
+// is less useful from a compact track row.
+const SEARCHABLE: ReadonlySet<LinkKind> = new Set(['spotify', 'youtube', 'soundcloud', 'shazam'])
 
 // Render order WITHIN the search cluster. Deliberately different from the
 // direct order: Shazam almost always returns Spotify direct, so Spotify-as-
 // search is the rare case. Putting it last keeps SoundCloud + YouTube in a
 // consistent column across rows (otherwise Spotify-search elbowing in
 // shifts everything else right).
-const SEARCH_ORDER: readonly LinkKind[] = ['soundcloud', 'youtube', 'spotify']
+const SEARCH_ORDER: readonly LinkKind[] = ['soundcloud', 'youtube', 'spotify', 'shazam']
 
 function buildSearchUrl(kind: LinkKind, query: string): string {
   const q = encodeURIComponent(query)
@@ -1062,11 +1737,17 @@ function buildSearchUrl(kind: LinkKind, query: string): string {
     case 'spotify':    return `https://open.spotify.com/search/${q}`
     case 'youtube':    return `https://www.youtube.com/results?search_query=${q}`
     case 'soundcloud': return `https://soundcloud.com/search?q=${q}`
+    case 'shazam':     return `https://www.shazam.com/search/${q}`
     default:           return ''
   }
 }
 
 interface ResolvedLink { kind: LinkKind; url: string; source: 'direct' | 'search' }
+
+interface TimelineEditEntry {
+  label: string
+  segments: SegmentOut[]
+}
 
 function resolveLinks(
   urls: Record<string, string>,
@@ -1109,13 +1790,13 @@ function Links({
   if (direct.length === 0 && search.length === 0) return null
   // Fixed-width slots so the divider sits at the same column across rows
   // (icons would otherwise drift left/right with each row's link count).
-  // Direct slot fits up to 4 icons (the realistic Shazam max is ~3); search
-  // slot fits the 3 SEARCHABLE platforms. Right-align directs and
+  // Direct slot fits up to 5 icons; search slot fits the 4 SEARCHABLE
+  // platforms. Right-align directs and
   // left-align searches so they meet at the divider.
   const showDivider = direct.length > 0 && search.length > 0
   return (
     <div className="flex items-center">
-      <div className="flex items-center gap-0.5 justify-end w-28">
+      <div className="flex items-center gap-0.5 justify-end w-36">
         {direct.map(renderLinkButton)}
       </div>
       <span
@@ -1124,7 +1805,7 @@ function Links({
         }
         aria-hidden
       />
-      <div className="flex items-center gap-0.5 justify-start w-24">
+      <div className="flex items-center gap-0.5 justify-start w-32">
         {search.map(renderLinkButton)}
       </div>
     </div>
