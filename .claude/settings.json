@@ -9,6 +9,9 @@
       "Bash(just test-backend)",
       "Bash(just test-web)",
       "Bash(just dev)",
+      "Bash(just desktop-dev)",
+      "Bash(just desktop-build)",
+      "Bash(just desktop-dist)",
       "Bash(bash scripts/check-claude-readiness.sh)"
     ],
     "deny": [

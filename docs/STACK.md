@@ -13,6 +13,7 @@
 - Local orchestration: Docker Compose plus local dev commands.
 - Deployment targets: macOS, Linux, homelab servers, Docker environments, and
   ARM64 where practical.
+- macOS desktop packaging: Electron shell plus PyInstaller backend executable.
 
 ## Repository Layout Target
 
@@ -40,6 +41,9 @@ just test
 just test-backend
 just test-web
 just check
+just desktop-dev
+just desktop-build
+just desktop-dist
 ```
 
 Before the app scaffold exists, these commands may skip missing subsystems. Once

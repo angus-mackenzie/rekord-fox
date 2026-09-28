@@ -40,6 +40,12 @@ def test_health(client):
     assert r.status_code == 200
 
 
+def test_api_prefix_alias_for_packaged_clients(client):
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
 def test_upload_unsupported_type_rejected(client, tmp_path):
     bad = tmp_path / "file.txt"
     bad.write_text("hello")

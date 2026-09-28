@@ -69,6 +69,7 @@ Planned MVP stack:
 - SQLite for MVP persistence
 - FFmpeg for media decoding and preprocessing
 - Docker Compose for self-hosting
+- Electron + PyInstaller for the macOS desktop bundle
 
 ## Development
 
@@ -89,6 +90,18 @@ subsystems. Until `just` is installed, run the bootstrap readiness check:
 ```sh
 bash scripts/check-claude-readiness.sh
 ```
+
+macOS desktop commands:
+
+```sh
+just desktop-dev
+just desktop-build
+just desktop-dist
+```
+
+`desktop-build` creates a local `.app` directory build. `desktop-dist` creates a
+DMG target for distribution experiments. Production distribution still needs
+Apple code signing and notarization.
 
 ## Claude Code
 

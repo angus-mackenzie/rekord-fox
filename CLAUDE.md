@@ -65,6 +65,7 @@ just lint
 just typecheck
 just test-backend
 just test-web
+just desktop-build
 ```
 
 If the app scaffold for a command does not exist yet, the command should report
@@ -75,6 +76,9 @@ If `just` is not installed yet, use the bootstrap check:
 ```sh
 bash scripts/check-claude-readiness.sh
 ```
+
+Use `just desktop-dev` for the local Electron wrapper, `just desktop-build` for
+an unpacked macOS `.app`, and `just desktop-dist` for a DMG experiment.
 
 ## Hard Rules
 

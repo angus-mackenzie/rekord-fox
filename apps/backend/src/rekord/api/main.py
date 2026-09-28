@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import select
 
 from ..audio.ffmpeg import file_checksum, probe_duration
@@ -83,6 +84,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def strip_api_prefix(request: Request, call_next):
+    """Let packaged clients call `/api/*` without duplicating every route."""
+    path = request.scope.get("path", "")
+    if path == "/api":
+        request.scope["path"] = "/"
+    elif path.startswith("/api/"):
+        request.scope["path"] = path[4:]
+    return await call_next(request)
+
 
 ALLOWED_EXTS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".mp4"}
 
@@ -593,3 +606,17 @@ def _short_uuid() -> str:
     import uuid
 
     return uuid.uuid4().hex[:8]
+
+
+def _mount_web_dist() -> None:
+    web_dist = settings.web_dist_dir
+    if web_dist is None:
+        return
+    index = web_dist / "index.html"
+    if not index.exists():
+        logging.getLogger(__name__).warning("REKORD_WEB_DIST_DIR has no index.html: %s", web_dist)
+        return
+    app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
+
+
+_mount_web_dist()

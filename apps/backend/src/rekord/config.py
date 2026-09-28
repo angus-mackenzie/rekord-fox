@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     waveform_cache_dir: Path = Path("data/waveforms")
     db_path: Path = Path("data/rekord.db")
+    web_dist_dir: Path | None = None
 
     chunk_seconds: float = 20.0
     chunk_overlap_seconds: float = 5.0

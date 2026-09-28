@@ -1,0 +1,48 @@
+{
+  "name": "rekord-fox-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Rekord-Fox desktop shell for macOS",
+  "author": "Angus",
+  "main": "src/main.cjs",
+  "scripts": {
+    "build:web": "npm --prefix ../web run build",
+    "build:backend": "cd ../backend && PYINSTALLER_CONFIG_DIR=../../build/pyinstaller-cache .venv/bin/python -m PyInstaller --noconfirm --clean --name rekord-backend --distpath ../../build/backend --workpath ../../build/pyinstaller scripts/run_desktop_server.py",
+    "dev": "npm run build:web && electron .",
+    "build:mac": "npm run build:web && npm run build:backend && ELECTRON_CACHE=../../build/electron-cache ELECTRON_BUILDER_CACHE=../../build/electron-builder-cache electron-builder --mac dir",
+    "dist:mac": "npm run build:web && npm run build:backend && ELECTRON_CACHE=../../build/electron-cache ELECTRON_BUILDER_CACHE=../../build/electron-builder-cache electron-builder --mac dmg",
+    "clean": "rm -rf ../../build/backend ../../build/pyinstaller ../../build/pyinstaller-cache ../../build/electron-cache ../../build/electron-builder-cache ../../release/desktop"
+  },
+  "devDependencies": {
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "app.rekordfox.desktop",
+    "productName": "Rekord Fox",
+    "asar": true,
+    "directories": {
+      "output": "../../release/desktop"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web"
+      },
+      {
+        "from": "../../build/backend/rekord-backend",
+        "to": "backend"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dir"
+      ]
+    }
+  }
+}
